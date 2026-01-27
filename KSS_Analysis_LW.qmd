@@ -1,0 +1,3892 @@
+---
+title: "Carryover Effects in Melatonin Suppression"
+subtitle: "Karolinska Sleepiness Scale (KSS) Analysis"
+author: "Letizia Woerrlein"
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    toc-location: left
+    number-sections: true
+    code-fold: show
+    code-tools: true
+    df-print: paged
+    embed-resources: true
+    theme: cosmo
+    fig-width: 10
+    fig-height: 8
+execute:
+  warning: false
+  message: false
+  cache: false
+---
+
+# Study Overview {.unnumbered}
+
+## Design
+
+**Study Type**: Within-subject controlled trial
+
+**Total Participants**: 9 (P01-P07, P09-P11)
+
+**Exclusions**:
+
+- P11: Complete exclusion (study dropout due to infection)
+- P10 Session 5: Excluded (light automation malfunction)
+- P07: Excluded from statistical analyses (negative melatonin suppression)
+
+## Study Phases
+
+### Phase 1: Pre-Ambulatory Period
+
+- **Duration**: 7 days
+- **Setting**: At home
+- **Measurements**: Sleep logs, ActLumus, ActiGraph, CGM
+
+### Phase 2: In-Laboratory Period
+
+- **Duration**: 10-13 days 
+- **Daily protocol**: Arrival 5.5h before habitual bedtime (HBT); Departure 0.5h before HBT
+- **Light conditions**:
+  - D (Dim): 10 lx continuously
+  - B (Bright): 10 lx → 1000 lx (1.5h) → 10 lx
+- **KSS measurements**: Every 30 minutes throughout chamber period (11 measurements per session, questionnaires 1-11)
+
+### Phase 3: Post-Ambulatory Period
+
+- **Duration**: 7 days
+- **Setting**: At home (identical to Phase 1)
+
+## Participant Groups
+
+### Group 1 (HBT 00:00)
+
+- **Participants**: P01, P02, P03
+- **Light sequence**: DDDBBBDDBDB (11 sessions)
+
+### Group 2 (HBT 22:00)
+
+- **Participants**: P04, P05
+- **Light sequence**: DBBBDDDBDB (10 sessions)
+
+### Group 3 (HBT 23:30)
+
+- **Participants**: P06, P07, P09
+- **Light sequence**: DBBBDDDBDB (10 sessions)
+
+### Group 4 (HBT 23:00)
+
+- **Participant**: P10
+- **Light sequence**: DDDBXDBBBDBDD (12 valid sessions, session 5 excluded due to light automation malfunction)
+
+# Setup
+
+## Load Required Packages
+
+```{r}
+#| label: setup-packages
+
+library(tidyverse)
+library(readxl)
+library(lme4)
+library(lmerTest)
+library(nlme)
+library(car)
+library(ggplot2)
+library(gridExtra)
+library(grid)
+library(cowplot)
+library(scales)
+library(knitr)
+library(kableExtra)
+library(broom.mixed)
+library(purrr)
+library(DHARMa)
+library(DT)
+library(patchwork)
+library(ggtext)
+```
+
+## Define Analysis Parameters
+
+```{r}
+#| label: setup-parameters
+
+# Participant list (excluding P07, P11)
+participant_list <- c("P01", "P02", "P03", "P04", "P05", "P06", "P09", "P10")
+
+# Light exposure patterns by participant
+light_patterns <- list(
+  "P01" = c("D", "D", "D", "B", "B", "B", "D", "D", "B", "D", "B"),
+  "P02" = c("D", "D", "D", "B", "B", "B", "D", "D", "B", "D", "B"),
+  "P03" = c("D", "D", "D", "B", "B", "B", "D", "D", "B", "D", "B"),
+  "P04" = c("D", "B", "B", "B", "D", "D", "D", "B", "D", "B"),
+  "P05" = c("D", "B", "B", "B", "D", "D", "D", "B", "D", "B"),
+  "P06" = c("D", "B", "B", "B", "D", "D", "D", "B", "D", "B"),
+  "P09" = c("D", "B", "B", "B", "D", "D", "D", "B", "D", "B"),
+  "P10" = c("D", "D", "D", "B", "X", "D", "B", "B", "B", "D", "B", "D", "D")
+)
+
+# Color scheme for visualizations
+light_colors <- c("dim" = "#4A90E2", "bright" = "#F5A623")
+
+doublet_colors <- c(
+  "DD" = "#4A90E2", "BD" = "#4A90E2",
+  "DB" = "#F5A623", "BB" = "#F5A623"
+)
+
+triplet_colors <- c(
+  "DDD" = "#4A90E2", "BDD" = "#4A90E2", "DBD" = "#4A90E2", "BBD" = "#4A90E2",
+  "DDB" = "#F5A623", "BDB" = "#F5A623", "DBB" = "#F5A623", "BBB" = "#F5A623"
+)
+
+# Labels for doublets and triplets (using expression for bold formatting)
+doublet_labels <- c(
+  "DD" = expression("D"*bold("D")),
+  "BD" = expression("B"*bold("D")),
+  "DB" = expression("D"*bold("B")),
+  "BB" = expression("B"*bold("B"))
+)
+
+triplet_labels <- c(
+  "DDD" = expression("DD"*bold("D")),
+  "BDD" = expression("BD"*bold("D")),
+  "DBD" = expression("DB"*bold("D")),
+  "BBD" = expression("BB"*bold("D")),
+  "DDB" = expression("DD"*bold("B")),
+  "BDB" = expression("BD"*bold("B")),
+  "DBB" = expression("DB"*bold("B")),
+  "BBB" = expression("BB"*bold("B"))
+)
+```
+
+# Data Processing 
+
+## Manual Data Cleaning: In-Session Surveys
+
+This analysis uses pre-processed in-session survey data. The raw data was downloaded from REDCap and underwent manual cleaning before analysis.
+
+### Input and Output Files
+
+- **Input**: Raw in-session survey data from *data/raw/group/group1-4/*
+- **Output**: *01_insessionsurvey_cleaned_YYYYMMDDTHHMMSS.xlsx* in *data/derivatives/*
+
+### Manual Processing Steps
+
+#### 1. Column Removal
+
+Unnecessary / doublet columns were removed from the raw data:
+- `A` (record_id)
+- `B` (redcap_survey_identifier)
+- `F` (general_info_complete)
+- `G` (session_survey_timestamp)
+- `H` (start_time)
+- `I` (participant_id2)
+- `J` (exp_session2)
+- `AI` (language_used_from)
+- `AJ` (session_survey_complete)
+
+#### 2. Column Renaming
+
+Columns were renamed for clarity and consistency:
+
+| Original Name | New Name |
+|--------------|----------|
+| general_info_timestamp | timestamp |
+| participant_id | ID |
+| exp_session | session |
+| kss_response | kss |
+| light_rating | light_comfort |
+| panas_upset | mood_upset |
+| panas_host | mood_hostile |
+| panas_alert | mood_alert |
+| panas_ashmd | mood_ashamed |
+| panas_insprd | mood_inspired |
+| panas_nervs | mood_nervous |
+| panas_determd | mood_determined |
+| panas_attent | mood_attentive |
+| panas_afraid | mood_afraid |
+| panas_active | mood_active |
+| session_therm_1 | thermal_comfort_now |
+| session_thermal_2 | thermal_comfort_assess |
+| session_thermal_3 | thermal_comfort_preference |
+
+#### 3. Data Standardization
+
+The following standardization procedures were applied:
+
+- Removal of incomplete entries
+- Standardization of participant ID format (P01, P02, etc.)
+- Replacement of missing values with NA
+- Conversion of session numbers (1 → 101: group number + experimental evening)
+- Addition of questionnaire number column (ques_numb)
+- Addition of light condition column (dim/bright based on experimental protocol)
+
+#### 4. Data Integration
+
+Merging of all group data (groups 1-4)
+
+### Final Dataframe Structure
+
+The cleaned dataset (In_session_Surveys) contains the following columns:
+
+- **A**: timestamp
+- **B**: ID (participant identifier)
+- **C**: session
+- **D**: ques_numb (questionnaire number)
+- **E**: kss (Karolinska Sleepiness Scale score)
+- **F**: light_comfort
+- **G-O**: Symptom ratings (discomfort, headache, blur_vis, double_vis, eye_strain, eye_burn, eye_water, light_sens, nausea)
+- **P-X**: PANAS mood ratings (upset, hostile, alert, ashamed, inspired, nervous, determined, attentive, afraid, active)
+- **Y**: mood_afraid
+- **Z**: thermal_comfort_now
+- **AA**: thermal_comfort_assess
+- **AB**: thermal_comfort_preference
+
+----
+
+# Data Import
+
+## Load and Standardize Data
+
+```{r}
+#| label: data-import
+
+# Load cleaned in-session survey data
+insess_surv <- read_excel(
+  "C:/Users/anton/OneDrive/AfterGlow/data/derivatives/01_insessionsurvey_cleaned_20250901T174900.xlsx"
+)
+
+# Standardize participant IDs, convert data types, and calculate temporal variables
+insess_surv <- insess_surv %>%
+  mutate(
+    # Ensure consistent participant ID formatting
+    id = case_when(
+      id %in% c("p01", "P01") ~ "P01",
+      id %in% c("p02", "P02") ~ "P02", 
+      id %in% c("p03", "P03") ~ "P03", 
+      id %in% c("p04", "P04") ~ "P04",
+      id %in% c("p05", "P05") ~ "P05",
+      id %in% c("p06", "P06") ~ "P06",
+      id %in% c("p07", "P07") ~ "P07",
+      id %in% c("p09", "P09") ~ "P09",
+      id %in% c("p10", "P10") ~ "P10",
+      TRUE ~ as.character(id)
+    ),
+    
+    # Convert to appropriate data types
+    session = as.character(session),
+    ques_numb = as.numeric(ques_numb),
+    light = tolower(trimws(as.character(light))),
+    kss = as.numeric(kss),
+    
+    # Calculate temporal position relative to habitual bedtime
+    hours_before_hbt = case_when(
+      ques_numb == 1 ~ 5.5, ques_numb == 2 ~ 5.0, ques_numb == 3 ~ 4.5,
+      ques_numb == 4 ~ 4.0, ques_numb == 5 ~ 3.5, ques_numb == 6 ~ 3.0,
+      ques_numb == 7 ~ 2.5, ques_numb == 8 ~ 2.0, ques_numb == 9 ~ 1.5,
+      ques_numb == 10 ~ 1.0, ques_numb == 11 ~ 0.5
+    )
+  ) %>%
+  
+  # Exclude invalid observations
+  filter(
+    !is.na(id), !is.na(session), !is.na(ques_numb), !is.na(light), 
+    !is.na(kss), !is.na(hours_before_hbt), 
+    ques_numb <= 11, light %in% c("dim", "bright")
+  )
+
+```
+
+# Calculate KSS Metrics
+
+KSS scores were averaged within each evening session to create a single sleepiness index per participant per evening. Questionnaires 7-9 (HBT-2.5h to HBT-1.5h) were selected to isolate the 1.5-hour intervention window where light conditions differed (10 lx vs 1000 lx), excluding pre-intervention baseline (Q1-Q6) and post-intervention recovery periods (Q10-Q11) where both conditions returned to 10 lx.** A sensitivity analysis (at the very end of this analysis) using Q8-Q10 tests robustness to this choice.
+```{r}
+#| label: kss-metrics
+
+# Mean KSS across all questionnaires (full 5-hour session)
+kss_per_evening <- insess_surv %>%
+  mutate(
+    session_raw = as.integer(str_extract(session, "\\d+$")),
+    exp_session = case_when(
+      id %in% c("P01", "P02", "P03") ~ session_raw - 100,
+      id %in% c("P04", "P05") ~ session_raw - 200,
+      id %in% c("P06", "P07", "P09") ~ session_raw - 300,
+      id == "P10" ~ session_raw - 400,
+      TRUE ~ NA_real_
+    )
+  ) %>%
+  group_by(id, exp_session, session) %>%
+  summarise(
+    mean_kss = mean(kss, na.rm = TRUE),
+    n_measurements = n(),
+    .groups = "drop"
+  ) %>%
+  rename(participant_id = id)
+
+# Mean KSS during intervention window only (Q7-Q9, 1.5 hours)
+kss_per_evening_q789 <- insess_surv %>%
+  filter(ques_numb %in% c(7, 8, 9)) %>%
+  mutate(
+    session_raw = as.integer(str_extract(session, "\\d+$")),
+    exp_session = case_when(
+      id %in% c("P01", "P02", "P03") ~ session_raw - 100,
+      id %in% c("P04", "P05") ~ session_raw - 200,
+      id %in% c("P06", "P07", "P09") ~ session_raw - 300,
+      id == "P10" ~ session_raw - 400,
+      TRUE ~ NA_real_
+    )
+  ) %>%
+  group_by(id, exp_session, session) %>%
+  summarise(
+    mean_kss = mean(kss, na.rm = TRUE),
+    n_measurements = n(),
+    .groups = "drop"
+  ) %>%
+  rename(participant_id = id)
+
+# Display descriptive statistics
+kss_per_evening %>%
+  group_by(participant_id) %>%
+  summarise(
+    n_sessions = n(),
+    M = round(mean(mean_kss), 2),
+    SD = round(sd(mean_kss), 2),
+    .groups = "drop"
+  ) %>%
+  print()
+
+kss_per_evening_q789 %>%
+  group_by(participant_id) %>%
+  summarise(
+    n_sessions = n(),
+    M = round(mean(mean_kss), 2),
+    SD = round(sd(mean_kss), 2),
+    .groups = "drop"
+  ) %>%
+  print()
+```
+```{r}
+#| label: view-kss-data
+
+# Add light condition by extracting character at position exp_session
+kss_display <- kss_per_evening %>%
+  select(participant_id, exp_session, mean_kss_full = mean_kss) %>%
+  left_join(
+    kss_per_evening_q789 %>% 
+      select(participant_id, exp_session, mean_kss_intervention = mean_kss),
+    by = c("participant_id", "exp_session")
+  ) %>%
+  mutate(
+    light_condition = map2_chr(participant_id, exp_session, function(pid, session) {
+      pattern_string <- paste(light_patterns[[pid]], collapse = "")
+      str_sub(pattern_string, session, session)
+    }),
+    light_condition = ifelse(light_condition == "X", "excluded", light_condition)
+  ) %>%
+  arrange(participant_id, exp_session) %>%
+  select(
+    Participant = participant_id,
+    Session = exp_session,
+    `Light Condition` = light_condition,
+    `KSS (5h window, Q1-11)` = mean_kss_full,
+    `KSS (1.5h intervention, Q7-9)` = mean_kss_intervention
+  )
+
+# Display table
+kss_display
+```
+
+# Visualization
+
+## Grand Average Time Course
+
+### Calculate Grand Average
+
+Following the melatonin analysis approach, grand averages are calculated by first computing per-participant means for each questionnaire and light condition, then averaging across participants to account for between-participant variability in the standard error calculation.
+```{r}
+#| label: grand-average-calculation
+
+# Step 1: Add exp_session and light pattern to raw data
+insess_surv_with_pattern <- insess_surv %>%
+  mutate(
+    session_raw = as.integer(str_extract(session, "\\d+$")),
+    exp_session = case_when(
+      id %in% c("P01", "P02", "P03") ~ session_raw - 100,
+      id %in% c("P04", "P05") ~ session_raw - 200,
+      id %in% c("P06", "P07", "P09") ~ session_raw - 300,
+      id == "P10" ~ session_raw - 400,
+      TRUE ~ NA_real_
+    ),
+    light_pattern = map2_chr(id, exp_session, function(pid, sess) {
+      if (is.na(sess) || sess < 1) return(NA_character_)
+      pattern <- light_patterns[[pid]]
+      if (sess > length(pattern)) return(NA_character_)
+      pattern[sess]
+    })
+  ) %>%
+  filter(!is.na(light_pattern), light_pattern != "X")
+
+# Step 2: Calculate per-participant means by questionnaire and light
+kss_summary_per_participant <- insess_surv_with_pattern %>%
+  group_by(id, ques_numb, light_pattern) %>%
+  summarise(
+    mean_kss = mean(kss, na.rm = TRUE),
+    sd_kss = sd(kss, na.rm = TRUE),
+    n = n(),
+    .groups = "drop"
+  ) %>%
+  rename(participant_id = id) %>%
+  mutate(light_pattern = factor(light_pattern, levels = c("D", "B"), 
+                                labels = c("DIM", "BRIGHT")))
+
+# Step 3: Exclude P07
+kss_summary_noP07 <- kss_summary_per_participant %>%
+  filter(participant_id != "P07")
+
+# Step 4: Grand average across participants (manual calculation for clarity)
+grand_summary_all <- data.frame()
+
+for(q in unique(kss_summary_noP07$ques_numb)) {
+  for(l in levels(kss_summary_noP07$light_pattern)) {
+    # Extract all participant means for this questionnaire and light
+    vals <- kss_summary_noP07 %>%
+      filter(ques_numb == q, light_pattern == l) %>%
+      pull(mean_kss)
+    
+    n_participants <- length(vals)
+    mean_val <- mean(vals, na.rm = TRUE)
+    sd_val <- sd(vals, na.rm = TRUE)
+    se_val <- sd_val / sqrt(n_participants)
+    
+    # Append to grand summary
+    grand_summary_all <- rbind(
+      grand_summary_all,
+      data.frame(
+        ques_numb = q,
+        light_type = l,
+        mean_kss = mean_val,
+        sd_kss = sd_val,
+        n_participants = n_participants,
+        se_kss = se_val
+      )
+    )
+  }
+}
+
+# Ensure proper factor ordering (BRIGHT first for legend)
+grand_summary_all$light_type <- factor(grand_summary_all$light_type, 
+                                       levels = c("BRIGHT", "DIM"))
+
+# Display summary
+cat("Grand average calculated across", length(unique(kss_summary_noP07$participant_id)), 
+    "participants (P07 excluded)\n\n")
+print(grand_summary_all)
+```
+
+### Plot Grand Average
+```{r}
+#| label: fig-grand-average
+#| fig-cap: "Grand average KSS time course across all participants (n=8, P07 excluded). Orange line shows bright evenings (1000 lx during intervention), blue line shows dim evenings (10 lx). Shaded regions indicate ±1 SE."
+#| fig-width: 10
+#| fig-height: 8
+
+# Prepare axis labels
+hbt_values <- c("5.5h", "5h", "4.5h", "4h", "3.5h", "3h", 
+                "2.5h", "2h", "1.5h", "1h", "0.5h")
+
+# Calculate y-axis limits
+y_vals <- grand_summary_all$mean_kss[is.finite(grand_summary_all$mean_kss)]
+se_vals <- grand_summary_all$se_kss[is.finite(grand_summary_all$se_kss)]
+
+if (length(y_vals) > 0 && length(se_vals) > 0) {
+  y_range <- range(c(y_vals - se_vals, y_vals + se_vals), na.rm = TRUE)
+  y_min <- floor(y_range[1] * 2) / 2
+  y_max <- ceiling(y_range[2] * 2) / 2 + 0.3
+} else {
+  y_min <- 1
+  y_max <- 9
+}
+
+if (!is.finite(y_min)) y_min <- 1
+if (!is.finite(y_max)) y_max <- 9
+
+# Create plot
+ggplot(grand_summary_all, 
+       aes(x = ques_numb, y = mean_kss, 
+           color = light_type, fill = light_type, group = light_type)) +
+  
+  # Background shading: Dim phases
+  annotate("rect", xmin = 1, xmax = 7, ymin = -Inf, ymax = Inf, 
+           fill = "#F5F5F5", alpha = 0.4) +
+  annotate("rect", xmin = 10, xmax = 11, ymin = -Inf, ymax = Inf, 
+           fill = "#F5F5F5", alpha = 0.4) +
+  
+  # Background shading: Intervention phase
+  annotate("rect", xmin = 7, xmax = 10, ymin = -Inf, ymax = Inf, 
+           fill = "#FFF9E6", alpha = 0.8) +
+  
+  # Phase labels
+  annotate("text", x = 3.75, y = y_max - 0.05, 
+           label = "dim\n(10 lx)", hjust = 0.5, vjust = 1, 
+           size = 3.5, color = "grey50", fontface = "italic") +
+  annotate("text", x = 8.5, y = y_max - 0.05, 
+           label = "intervention\n(10 or 1000 lx)", hjust = 0.5, vjust = 1, 
+           size = 3.5, color = "#B8860B", fontface = "italic") +
+  annotate("text", x = 10.5, y = y_max - 0.05, 
+           label = "dim\n(10 lx)", hjust = 0.5, vjust = 1, 
+           size = 3.5, color = "grey50", fontface = "italic") +
+  
+  # Confidence ribbon
+  geom_ribbon(aes(ymin = mean_kss - se_kss, ymax = mean_kss + se_kss), 
+              alpha = 0.1, color = NA, show.legend = FALSE) +
+  
+  # Line and points
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 3.5, shape = 16) +
+  
+  # Color scale
+  scale_color_manual(
+    values = c("BRIGHT" = "#F5A623", "DIM" = "#4A90E2"),
+    labels = c("BRIGHT" = "Bright (1000 lx)", "DIM" = "Dim (10 lx)")
+  ) +
+  scale_fill_manual(
+    values = c("BRIGHT" = "#F5A623", "DIM" = "#4A90E2"),
+    labels = c("BRIGHT" = "Bright (1000 lx)", "DIM" = "Dim (10 lx)")
+  ) +
+  
+  # Axes
+  scale_x_continuous(
+    breaks = 1:11,
+    labels = paste0("Q", 1:11, "\n(", hbt_values, ")"),
+    limits = c(0.5, 11.5),
+    expand = c(0, 0)
+  ) +
+  scale_y_continuous(
+    limits = c(y_min, y_max),
+    breaks = seq(y_min, y_max, 0.5),
+    expand = c(0, 0)
+  ) +
+  
+  # Labels
+  labs(
+    title = "Karolinska sleepiness scale (KSS) time course",
+    subtitle = "Grand average across all participants (P07 excluded, n=8)",
+    x = "KSS question number (hours before HBT)",
+    y = expression(atop("Mean KSS ± SE", 
+                        scriptstyle("(1 = Extremely alert; 9 = Very sleepy)"))),
+    color = "Light condition",
+    fill = "Light condition"
+  ) +
+  
+  # Theme
+  theme_classic(base_size = 14) +
+  theme(
+    aspect.ratio = 1,
+    plot.title = element_text(size = 16, hjust = 0, face = "plain"),
+    plot.subtitle = element_text(size = 13, hjust = 0, margin = margin(b = 10)),
+    axis.text = element_text(color = "black", size = 13),
+    axis.title = element_text(size = 14),
+    axis.title.x = element_text(margin = margin(t = 8)),
+    axis.title.y = element_text(margin = margin(r = 8)),
+    panel.grid.major.y = element_line(color = "grey90", linewidth = 0.3),
+    legend.position = "right",
+    plot.margin = margin(15, 10, 10, 10)
+  )
+```
+
+# Sequence Analysis
+
+## Define Sequential Patterns
+
+```{r}
+#| label: define-sequences
+#| code-fold: true
+
+# Group 1 (P01-P03): DDDBBBDDBDB
+doublet_positions_g1 <- tibble(
+  doublet = c("DD", "DB", "BD", "BB"),
+  position1_sessions = list(c(1, 2, 7), c(3, 8, 10), c(6, 9), c(4, 5)),
+  position2_sessions = list(c(2, 3, 8), c(4, 9, 11), c(7, 10), c(5, 6))
+)
+
+triplet_positions_g1 <- tibble(
+  triplet = c("DDD", "DDB", "DBD", "DBB", "BDD", "BDB", "BBD", "BBB"),
+  position1_sessions = list(c(1), c(2, 7), c(8), c(3), c(6), c(9), c(5), c(4)),
+  position2_sessions = list(c(2), c(3, 8), c(9), c(4), c(7), c(10), c(6), c(5)),
+  position3_sessions = list(c(3), c(4, 9), c(10), c(5), c(8), c(11), c(7), c(6))
+)
+
+# Groups 2 & 3 (P04-P06, P09): DBBBDDDBDB
+doublet_positions_g2_g3 <- tibble(
+  doublet = c("DD", "DB", "BD", "BB"),
+  position1_sessions = list(c(5, 6), c(1, 7, 9), c(4, 8), c(2, 3)),
+  position2_sessions = list(c(6, 7), c(2, 8, 10), c(5, 9), c(3, 4))
+)
+
+triplet_positions_g2_g3 <- tibble(
+  triplet = c("DDD", "DDB", "DBD", "DBB", "BDD", "BDB", "BBD", "BBB"),
+  position1_sessions = list(c(5), c(6), c(7), c(1), c(4), c(8), c(3), c(2)),
+  position2_sessions = list(c(6), c(7), c(8), c(2), c(5), c(9), c(4), c(3)),
+  position3_sessions = list(c(7), c(8), c(9), c(3), c(6), c(10), c(5), c(4))
+)
+
+# Group 4 (P10): DDDBDBBBDBDD (session 5 excluded)
+doublet_positions_g4 <- tibble(
+  doublet = c("DD", "DB", "BD", "BB"),
+  position1_sessions = list(c(1, 2, 12), c(3, 6, 10), c(9, 11), c(7, 8)),
+  position2_sessions = list(c(2, 3, 13), c(4, 7, 11), c(10, 12), c(8, 9))
+)
+
+triplet_positions_g4 <- tibble(
+  triplet = c("DDD", "DDB", "DBD", "DBB", "BDD", "BDB", "BBD", "BBB"),
+  position1_sessions = list(c(1), c(2), c(10), c(6), c(11), c(9), c(8), c(7)),
+  position2_sessions = list(c(2), c(3), c(11), c(7), c(12), c(10), c(9), c(8)),
+  position3_sessions = list(c(3), c(4), c(12), c(8), c(13), c(11), c(10), c(9))
+)
+```
+
+## Calculate Sequence Metrics
+
+Mean KSS scores were calculated for each doublet and triplet position across all occurrences of that sequence for each participant.
+
+```{r}
+#| label: sequence-calculation
+#| code-fold: true
+
+# Function to calculate doublet positions
+calc_doublet_positions_kss <- function(participant_id, kss_data, doublet_map) {
+  doublet_map %>%
+    rowwise() %>%
+    mutate(
+      pos1_kss = mean(kss_data$mean_kss[kss_data$exp_session %in% position1_sessions], 
+                      na.rm = TRUE),
+      pos2_kss = mean(kss_data$mean_kss[kss_data$exp_session %in% position2_sessions], 
+                      na.rm = TRUE),
+      participant = participant_id
+    ) %>%
+    ungroup() %>%
+    select(participant, doublet, pos1_kss, pos2_kss)
+}
+
+# Function to calculate triplet positions
+calc_triplet_positions_kss <- function(participant_id, kss_data, triplet_map) {
+  triplet_map %>%
+    rowwise() %>%
+    mutate(
+      pos1_kss = if(length(position1_sessions) > 0) {
+        mean(kss_data$mean_kss[kss_data$exp_session %in% position1_sessions], na.rm = TRUE)
+      } else NA_real_,
+      pos2_kss = if(length(position2_sessions) > 0) {
+        mean(kss_data$mean_kss[kss_data$exp_session %in% position2_sessions], na.rm = TRUE)
+      } else NA_real_,
+      pos3_kss = if(length(position3_sessions) > 0) {
+        mean(kss_data$mean_kss[kss_data$exp_session %in% position3_sessions], na.rm = TRUE)
+      } else NA_real_,
+      participant = participant_id
+    ) %>%
+    ungroup() %>%
+    select(participant, triplet, pos1_kss, pos2_kss, pos3_kss)
+}
+
+# Extract KSS data per participant (intervention period Q7-Q9 only)
+kss_list <- list(
+  P01 = kss_per_evening_q789 %>% filter(participant_id == "P01"),
+  P02 = kss_per_evening_q789 %>% filter(participant_id == "P02"),
+  P03 = kss_per_evening_q789 %>% filter(participant_id == "P03"),
+  P04 = kss_per_evening_q789 %>% filter(participant_id == "P04"),
+  P05 = kss_per_evening_q789 %>% filter(participant_id == "P05"),
+  P06 = kss_per_evening_q789 %>% filter(participant_id == "P06"),
+  P09 = kss_per_evening_q789 %>% filter(participant_id == "P09"),
+  P10 = kss_per_evening_q789 %>% filter(participant_id == "P10")
+)
+
+# Calculate sequences for each group
+doublets_g1 <- bind_rows(
+  calc_doublet_positions_kss("P01", kss_list$P01, doublet_positions_g1),
+  calc_doublet_positions_kss("P02", kss_list$P02, doublet_positions_g1),
+  calc_doublet_positions_kss("P03", kss_list$P03, doublet_positions_g1)
+)
+
+doublets_g2_g3 <- bind_rows(
+  calc_doublet_positions_kss("P04", kss_list$P04, doublet_positions_g2_g3),
+  calc_doublet_positions_kss("P05", kss_list$P05, doublet_positions_g2_g3),
+  calc_doublet_positions_kss("P06", kss_list$P06, doublet_positions_g2_g3),
+  calc_doublet_positions_kss("P09", kss_list$P09, doublet_positions_g2_g3)
+)
+
+doublets_g4 <- calc_doublet_positions_kss("P10", kss_list$P10, doublet_positions_g4)
+
+triplets_g1 <- bind_rows(
+  calc_triplet_positions_kss("P01", kss_list$P01, triplet_positions_g1),
+  calc_triplet_positions_kss("P02", kss_list$P02, triplet_positions_g1),
+  calc_triplet_positions_kss("P03", kss_list$P03, triplet_positions_g1)
+)
+
+triplets_g2_g3 <- bind_rows(
+  calc_triplet_positions_kss("P04", kss_list$P04, triplet_positions_g2_g3),
+  calc_triplet_positions_kss("P05", kss_list$P05, triplet_positions_g2_g3),
+  calc_triplet_positions_kss("P06", kss_list$P06, triplet_positions_g2_g3),
+  calc_triplet_positions_kss("P09", kss_list$P09, triplet_positions_g2_g3)
+)
+
+triplets_g4 <- calc_triplet_positions_kss("P10", kss_list$P10, triplet_positions_g4)
+
+# Combine all participants
+pos_kss_all_q789 <- bind_rows(doublets_g1, doublets_g2_g3, doublets_g4)
+triplet_kss_all_q789 <- bind_rows(triplets_g1, triplets_g2_g3, triplets_g4)
+```
+
+```{r}
+#| label: sequence-calculation-5h
+#| code-fold: true
+
+# Calculate doublets and triplets for FULL 5-hour window (using kss_per_evening)
+
+# Extract KSS data per participant (full 5h window)
+kss_list_5h <- list(
+  P01 = kss_per_evening %>% filter(participant_id == "P01"),
+  P02 = kss_per_evening %>% filter(participant_id == "P02"),
+  P03 = kss_per_evening %>% filter(participant_id == "P03"),
+  P04 = kss_per_evening %>% filter(participant_id == "P04"),
+  P05 = kss_per_evening %>% filter(participant_id == "P05"),
+  P06 = kss_per_evening %>% filter(participant_id == "P06"),
+  P09 = kss_per_evening %>% filter(participant_id == "P09"),
+  P10 = kss_per_evening %>% filter(participant_id == "P10")
+)
+
+# Calculate doublets for each group (5h window)
+doublets_g1_5h <- bind_rows(
+  calc_doublet_positions_kss("P01", kss_list_5h$P01, doublet_positions_g1),
+  calc_doublet_positions_kss("P02", kss_list_5h$P02, doublet_positions_g1),
+  calc_doublet_positions_kss("P03", kss_list_5h$P03, doublet_positions_g1)
+)
+
+doublets_g2_g3_5h <- bind_rows(
+  calc_doublet_positions_kss("P04", kss_list_5h$P04, doublet_positions_g2_g3),
+  calc_doublet_positions_kss("P05", kss_list_5h$P05, doublet_positions_g2_g3),
+  calc_doublet_positions_kss("P06", kss_list_5h$P06, doublet_positions_g2_g3),
+  calc_doublet_positions_kss("P09", kss_list_5h$P09, doublet_positions_g2_g3)
+)
+
+doublets_g4_5h <- calc_doublet_positions_kss("P10", kss_list_5h$P10, doublet_positions_g4)
+
+# Calculate triplets for each group (5h window)
+triplets_g1_5h <- bind_rows(
+  calc_triplet_positions_kss("P01", kss_list_5h$P01, triplet_positions_g1),
+  calc_triplet_positions_kss("P02", kss_list_5h$P02, triplet_positions_g1),
+  calc_triplet_positions_kss("P03", kss_list_5h$P03, triplet_positions_g1)
+)
+
+triplets_g2_g3_5h <- bind_rows(
+  calc_triplet_positions_kss("P04", kss_list_5h$P04, triplet_positions_g2_g3),
+  calc_triplet_positions_kss("P05", kss_list_5h$P05, triplet_positions_g2_g3),
+  calc_triplet_positions_kss("P06", kss_list_5h$P06, triplet_positions_g2_g3),
+  calc_triplet_positions_kss("P09", kss_list_5h$P09, triplet_positions_g2_g3)
+)
+
+triplets_g4_5h <- calc_triplet_positions_kss("P10", kss_list_5h$P10, triplet_positions_g4)
+
+# Combine all participants (5h window)
+pos_kss_all <- bind_rows(doublets_g1_5h, doublets_g2_g3_5h, doublets_g4_5h)
+triplet_kss_all <- bind_rows(triplets_g1_5h, triplets_g2_g3_5h, triplets_g4_5h)
+```
+
+## Sequence Analysis Plots
+
+### Doublet Analysis
+
+#### Full Session (5-hour exposure)
+
+**KSS levels under light exposure doublets**
+```{r}
+#| label: fig-doublet-box-5h
+#| fig-cap: "Mean KSS per doublet type (5-h exposure, P07 excluded)"
+#| fig-width: 8
+#| fig-height: 8
+
+# Prepare data using full 5h window
+df_doublet_box_5h <- pos_kss_all %>%
+  filter(participant != "P07") %>%
+  select(participant, doublet, mean_kss = pos2_kss) %>%
+  mutate(doublet = factor(doublet, levels = c("DD", "BD", "DB", "BB")))
+
+# Calculate y-axis limits
+y_min <- floor(min(df_doublet_box_5h$mean_kss[is.finite(df_doublet_box_5h$mean_kss)]) * 2) / 2
+y_max <- ceiling(max(df_doublet_box_5h$mean_kss[is.finite(df_doublet_box_5h$mean_kss)]) * 2) / 2
+
+# Create plot
+ggplot(df_doublet_box_5h, aes(x = doublet, y = mean_kss)) +
+  geom_boxplot(aes(fill = doublet), outlier.shape = NA, width = 0.6, linewidth = 0.5) +
+  geom_point(position = position_jitter(width = 0.15), 
+             size = 2.5, alpha = 0.7, shape = 16, stroke = 0) +
+  scale_fill_manual(values = doublet_colors) +
+  scale_x_discrete(labels = doublet_labels) +
+  scale_y_continuous(limits = c(y_min, y_max),
+                     breaks = seq(1, 9, 0.5),
+                     expand = expansion(mult = c(0.02, 0.05))) +
+  labs(title = "Karolinska Sleepiness Scale under light exposure doublets",
+       subtitle = "Mean second-day KSS scores per doublet type (5-h exposure; P07 excluded)",
+       x = "Doublet", 
+       y = expression(atop("Mean KSS", 
+                           scriptstyle("(1 = Extremely alert; 9 = Very sleepy)")))) +
+  theme_classic(base_size = 14) +
+ theme(
+  aspect.ratio = 1,
+  plot.title = element_text(size = 16, hjust = 0),
+  plot.subtitle = element_text(size = 13, hjust = 0, margin = margin(b = 10)),
+  axis.text = element_text(color = "black", size = 13),
+  axis.title = element_text(size = 14),
+  axis.title.x = element_text(margin = margin(t = 8)),
+  axis.title.y = element_text(margin = margin(r = 8)),
+  panel.grid.major.y = element_line(color = "grey90", linewidth = 0.3),
+  legend.position = "none",
+  plot.margin = margin(25, 10, 10, 10)  
+  )
+```
+
+##### Data Overview: Doublet Observations
+```{r}
+#| label: doublet-overview-5h
+
+# Create detailed overview table
+doublet_overview_5h <- pos_kss_all %>%
+  filter(participant != "P07") %>%
+  select(participant, doublet, pos1_kss, pos2_kss) %>%
+  arrange(participant, doublet)
+
+doublet_overview_5h
+```
+
+#### Intervention Window (1.5-hour exposure)
+
+**KSS levels under light exposure doublets**
+```{r}
+#| label: fig-doublet-box-intervention
+#| fig-cap: "Mean KSS per doublet type (1.5-h intervention window, P07 excluded)"
+#| fig-width: 8
+#| fig-height: 8
+
+# Prepare data using intervention window only
+df_doublet_box_q789 <- pos_kss_all_q789 %>%
+  filter(participant != "P07") %>%
+  select(participant, doublet, mean_kss = pos2_kss) %>%
+  mutate(doublet = factor(doublet, levels = c("DD", "BD", "DB", "BB")))
+
+# Calculate y-axis limits
+y_min <- floor(min(df_doublet_box_q789$mean_kss[is.finite(df_doublet_box_q789$mean_kss)]) * 2) / 2
+y_max <- ceiling(max(df_doublet_box_q789$mean_kss[is.finite(df_doublet_box_q789$mean_kss)]) * 2) / 2
+
+# Create plot
+ggplot(df_doublet_box_q789, aes(x = doublet, y = mean_kss)) +
+  geom_boxplot(aes(fill = doublet), outlier.shape = NA, width = 0.6, linewidth = 0.5) +
+  geom_point(position = position_jitter(width = 0.15), 
+             size = 2.5, alpha = 0.7, shape = 16, stroke = 0) +
+  scale_fill_manual(values = doublet_colors) +
+  scale_x_discrete(labels = doublet_labels) +
+  scale_y_continuous(limits = c(y_min, y_max),
+                     breaks = seq(1, 9, 0.5),
+                     expand = expansion(mult = c(0.02, 0.05))) +
+  labs(
+    title = "Karolinska Sleepiness Scale under light exposure doublets",
+    subtitle = "Mean second-day KSS scores per doublet type (1.5-h exposure; P07 excluded)",
+    x = "Doublet", 
+    y = expression(atop("Mean KSS", 
+                        scriptstyle("(1 = Extremely alert; 9 = Very sleepy)")))
+  ) +
+  theme_classic(base_size = 14) +
+  theme(
+    aspect.ratio = 1,
+
+    # Title and subtitle sizes added
+    plot.title = element_text(size = 16, hjust = 0),
+    plot.subtitle = element_text(size = 13, hjust = 0, margin = margin(b = 10)),
+
+    axis.text = element_text(color = "black", size = 13),
+    axis.title = element_text(size = 14),
+    axis.title.x = element_text(margin = margin(t = 8)),
+    axis.title.y = element_text(margin = margin(r = 8)),
+    panel.grid.major.y = element_line(color = "grey90", linewidth = 0.3),
+    legend.position = "none",
+    plot.margin = margin(15, 10, 10, 10)
+  )
+```
+
+##### Data Overview: Doublet Observations
+```{r}
+#| label: doublet-overview-intervention
+
+# Create detailed overview table
+doublet_overview_q789 <- pos_kss_all_q789 %>%
+  filter(participant != "P07") %>%
+  select(participant, doublet, pos1_kss, pos2_kss) %>%
+  arrange(participant, doublet)
+
+doublet_overview_q789
+```
+
+### Doublet Position Trajectory
+
+#### Full Session (5-hour exposure)
+
+**Mean KSS trajectory across doublet positions**
+```{r}
+#| label: fig-doublet-position-5h
+#| fig-cap: "Mean KSS trajectory across doublet positions (5-h exposure, P07 excluded)"
+#| fig-width: 8
+#| fig-height: 8
+
+# Prepare position data using full 5h window
+mean_doublet_pos_5h <- pos_kss_all %>%
+  filter(participant != "P07") %>%
+  group_by(doublet) %>%
+  summarise(
+    pos1_mean = mean(pos1_kss, na.rm = TRUE),
+    pos2_mean = mean(pos2_kss, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  pivot_longer(cols = c(pos1_mean, pos2_mean), 
+               names_to = "position", values_to = "mean_kss") %>%
+  mutate(
+    position_num = ifelse(position == "pos1_mean", 1, 2),
+    light_type = ifelse(position == "pos1_mean", 
+                       substr(doublet, 1, 1), substr(doublet, 2, 2)),
+    light_label = ifelse(light_type == "D", "dim", "bright"),
+    doublet = factor(doublet, levels = c("DD", "BD", "DB", "BB"))
+  )
+
+# Calculate y-axis limits
+y_min <- floor(min(mean_doublet_pos_5h$mean_kss[is.finite(mean_doublet_pos_5h$mean_kss)]) * 2) / 2
+y_max <- ceiling(max(mean_doublet_pos_5h$mean_kss[is.finite(mean_doublet_pos_5h$mean_kss)]) * 2) / 2
+
+# Create plot
+ggplot(mean_doublet_pos_5h, aes(x = position_num, y = mean_kss, group = doublet)) +
+  geom_line(color = "grey60", linewidth = 0.6, alpha = 0.7) +
+  geom_point(aes(color = light_label), size = 3.5, shape = 16) +
+  scale_color_manual(values = light_colors,
+                     labels = c("dim" = "Dim (10 lx)", 
+                                "bright" = "Bright (1000 lx)")) +
+  scale_x_continuous(breaks = c(1, 2), 
+                     labels = c("Position 1", "Position 2"), 
+                     limits = c(0.8, 2.2)) +
+  scale_y_continuous(limits = c(y_min, y_max),
+                     breaks = seq(1, 9, 0.5),
+                     expand = expansion(mult = c(0.05, 0.05))) +
+  labs(
+    title = "Karolinska Sleepiness Scale across light exposure doublets",
+    subtitle = "Mean KSS scores across all participants (5-h exposure; P07 excluded)",
+    x = "Doublet position", 
+    y = expression(atop("Mean KSS", 
+                        scriptstyle("(1 = Extremely alert; 9 = Very sleepy)"))),
+    color = "Light condition"
+  ) +
+  theme_classic(base_size = 14) +
+  theme(
+    aspect.ratio = 1,
+
+    # Title and subtitle size adjustments
+    plot.title = element_text(size = 16, hjust = 0),
+    plot.subtitle = element_text(size = 13, hjust = 0, margin = margin(b = 10)),
+
+    axis.text = element_text(color = "black", size = 13),
+    axis.title = element_text(size = 14),
+    axis.title.x = element_text(margin = margin(t = 8)),
+    axis.title.y = element_text(margin = margin(r = 8)),
+    panel.grid.major.y = element_line(color = "grey90", linewidth = 0.3),
+
+    legend.position = "right",
+    legend.title = element_text(size = 13),
+    legend.text = element_text(size = 12),
+
+    plot.margin = margin(15, 10, 10, 10)
+  )
+```
+
+#### Intervention Window (1.5-hour exposure)
+
+**Mean KSS trajectory across doublet positions**
+```{r}
+#| label: fig-doublet-position-intervention
+#| fig-cap: "Mean KSS trajectory across doublet positions (1.5-h intervention window, P07 excluded)"
+#| fig-width: 8
+#| fig-height: 8
+
+# Prepare position data using intervention window
+mean_doublet_pos_q789 <- pos_kss_all_q789 %>%
+  filter(participant != "P07") %>%
+  group_by(doublet) %>%
+  summarise(
+    pos1_mean = mean(pos1_kss, na.rm = TRUE),
+    pos2_mean = mean(pos2_kss, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  pivot_longer(cols = c(pos1_mean, pos2_mean), 
+               names_to = "position", values_to = "mean_kss") %>%
+  mutate(
+    position_num = ifelse(position == "pos1_mean", 1, 2),
+    light_type = ifelse(position == "pos1_mean", 
+                       substr(doublet, 1, 1), substr(doublet, 2, 2)),
+    light_label = ifelse(light_type == "D", "dim", "bright"),
+    doublet = factor(doublet, levels = c("DD", "BD", "DB", "BB"))
+  )
+
+# Calculate y-axis limits
+y_min <- floor(min(mean_doublet_pos_q789$mean_kss[is.finite(mean_doublet_pos_q789$mean_kss)]) * 2) / 2
+y_max <- ceiling(max(mean_doublet_pos_q789$mean_kss[is.finite(mean_doublet_pos_q789$mean_kss)]) * 2) / 2
+
+# Create plot
+ggplot(mean_doublet_pos_q789, aes(x = position_num, y = mean_kss, group = doublet)) +
+  geom_line(color = "grey60", linewidth = 0.6, alpha = 0.7) +
+  geom_point(aes(color = light_label), size = 3.5, shape = 16) +
+  scale_color_manual(values = light_colors,
+                     labels = c("dim" = "Dim (10 lx)", 
+                                "bright" = "Bright (1000 lx)")) +
+  scale_x_continuous(breaks = c(1, 2), 
+                     labels = c("Position 1", "Position 2"), 
+                     limits = c(0.8, 2.2)) +
+  scale_y_continuous(limits = c(y_min, y_max),
+                     breaks = seq(1, 9, 0.5),
+                     expand = expansion(mult = c(0.05, 0.05))) +
+  labs(
+    title = "Karolinska Sleepiness Scale across light exposure doublets",
+    subtitle = "Mean KSS scores across all participants (1.5-h exposure; P07 excluded)",
+    x = "Doublet position", 
+    y = expression(atop("Mean KSS", 
+                        scriptstyle("(1 = Extremely alert; 9 = Very sleepy)"))),
+    color = "Light condition"
+  ) +
+  theme_classic(base_size = 14) +
+  theme(
+    aspect.ratio = 1,
+
+    # Title & subtitle sizes added
+    plot.title = element_text(size = 16, hjust = 0),
+    plot.subtitle = element_text(size = 13, hjust = 0, margin = margin(b = 10)),
+
+    axis.text = element_text(color = "black", size = 13),
+    axis.title = element_text(size = 14),
+    axis.title.x = element_text(margin = margin(t = 8)),
+    axis.title.y = element_text(margin = margin(r = 8)),
+    panel.grid.major.y = element_line(color = "grey90", linewidth = 0.3),
+
+    legend.position = "right",
+    legend.title = element_text(size = 13),
+    legend.text = element_text(size = 12),
+
+    plot.margin = margin(15, 10, 10, 10)
+  )
+```
+
+### Doublet Intervention Window Summary Statistics (Boxplots)
+```{r}
+# Calculate statistics for 5-h exposure (full session)
+doublet_stats_5h <- pos_kss_all %>%
+  filter(participant != "P07") %>%
+  select(doublet, pos2_kss) %>%
+  group_by(doublet) %>%
+  summarise(
+    n_5h = n(),
+    median_5h = median(pos2_kss, na.rm = TRUE),
+    IQR_5h = IQR(pos2_kss, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Calculate statistics for 1.5-h exposure (intervention window)
+doublet_stats_1.5h <- pos_kss_all_q789 %>%
+  filter(participant != "P07") %>%
+  select(doublet, pos2_kss) %>%
+  group_by(doublet) %>%
+  summarise(
+    n_1.5h = n(),
+    median_1.5h = median(pos2_kss, na.rm = TRUE),
+    IQR_1.5h = IQR(pos2_kss, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Combine both exposure windows
+doublet_stats_combined <- doublet_stats_5h %>%
+  full_join(doublet_stats_1.5h, by = "doublet") %>%
+  mutate(doublet = factor(doublet, levels = c("DD", "BD", "DB", "BB"))) %>%
+  arrange(doublet)
+
+# Display as formatted table
+knitr::kable(
+  doublet_stats_combined,
+  digits = 2,
+  col.names = c("Doublet", "N", "Median", "IQR", "N", "Median", "IQR"),
+  caption = "Descriptive statistics for doublet second-day KSS scores across exposure windows (P07 excluded)",
+  align = c("l", rep("r", 6))
+) %>%
+  kableExtra::add_header_above(c(" " = 1, "5-h Exposure" = 3, "1.5-h Exposure" = 3))
+```
+
+### Triplet Analysis
+
+#### Full Session (5-hour exposure)
+
+**KSS levels under light exposure triplets**
+```{r}
+#| label: fig-triplet-box-5h
+#| fig-cap: "Mean KSS per triplet type (5-h exposure, P07 excluded)"
+#| fig-width: 10
+#| fig-height: 8
+
+# Prepare data using full 5h window
+df_triplet_box_5h <- triplet_kss_all %>%
+  filter(participant != "P07", !is.na(pos3_kss)) %>%
+  select(participant, triplet, mean_kss = pos3_kss) %>%
+  mutate(triplet = factor(triplet, levels = c("DDD", "BDD", "DBD", "BBD",
+                                              "DDB", "BDB", "DBB", "BBB")))
+
+# Calculate y-axis limits
+y_min <- floor(min(df_triplet_box_5h$mean_kss[is.finite(df_triplet_box_5h$mean_kss)]) * 2) / 2
+y_max <- ceiling(max(df_triplet_box_5h$mean_kss[is.finite(df_triplet_box_5h$mean_kss)]) * 2) / 2
+
+# Create plot
+ggplot(df_triplet_box_5h, aes(x = triplet, y = mean_kss)) +
+  geom_boxplot(aes(fill = triplet), outlier.shape = NA, width = 0.45, linewidth = 0.5) +
+  geom_point(position = position_jitter(width = 0.1), 
+             size = 2.5, alpha = 0.7, shape = 16, stroke = 0) +
+  scale_fill_manual(values = triplet_colors) +
+  scale_x_discrete(labels = triplet_labels) +
+  scale_y_continuous(limits = c(y_min, y_max),
+                     breaks = seq(1, 9, 0.5),
+                     expand = expansion(mult = c(0.02, 0.05))) +
+  labs(
+    title = "Karolinska Sleepiness Scale under light exposure triplets",
+    subtitle = "Mean third-day KSS scores per triplet type (5-h exposure; P07 excluded)",
+    x = "Triplet", 
+    y = expression(atop("Mean KSS", 
+                        scriptstyle("(1 = Extremely alert; 9 = Very sleepy)")))
+  ) +
+  theme_classic(base_size = 14) +
+  theme(
+    aspect.ratio = 1,
+
+    # Added title/subtitle sizes
+    plot.title = element_text(size = 16, hjust = 0),
+    plot.subtitle = element_text(size = 13, hjust = 0, margin = margin(b = 10)),
+
+    axis.text = element_text(color = "black", size = 11),
+    axis.text.x = element_text(size = 9),
+    axis.text.y = element_text(size = 13),
+    axis.title = element_text(size = 14),
+    axis.title.x = element_text(margin = margin(t = 8)),
+    axis.title.y = element_text(margin = margin(r = 8)),
+    panel.grid.major.y = element_line(color = "grey90", linewidth = 0.3),
+    legend.position = "none",
+    plot.margin = margin(15, 10, 10, 10)
+  )
+```
+
+##### Data Overview: Triplet Observations
+```{r}
+#| label: triplet-overview-5h
+
+# Create detailed overview table
+triplet_overview_5h <- triplet_kss_all %>%
+  filter(participant != "P07", !is.na(pos3_kss)) %>%
+  select(participant, triplet, pos1_kss, pos2_kss, pos3_kss) %>%
+  arrange(participant, triplet)
+
+triplet_overview_5h
+```
+
+#### Intervention Window (1.5-hour exposure)
+
+**KSS levels under light exposure triplets**
+```{r}
+#| label: fig-triplet-box-intervention
+#| fig-cap: "Mean KSS per triplet type (1.5-h intervention window, P07 excluded)"
+#| fig-width: 10
+#| fig-height: 8
+
+# Prepare data using intervention window
+df_triplet_box_q789 <- triplet_kss_all_q789 %>%
+  filter(participant != "P07", !is.na(pos3_kss)) %>%
+  select(participant, triplet, mean_kss = pos3_kss) %>%
+  mutate(triplet = factor(triplet, levels = c("DDD", "BDD", "DBD", "BBD",
+                                              "DDB", "BDB", "DBB", "BBB")))
+
+# Calculate y-axis limits
+y_min <- floor(min(df_triplet_box_q789$mean_kss[is.finite(df_triplet_box_q789$mean_kss)]) * 2) / 2
+y_max <- ceiling(max(df_triplet_box_q789$mean_kss[is.finite(df_triplet_box_q789$mean_kss)]) * 2) / 2
+
+# Create plot
+ggplot(df_triplet_box_q789, aes(x = triplet, y = mean_kss)) +
+  geom_boxplot(aes(fill = triplet), outlier.shape = NA, width = 0.45, linewidth = 0.5) +
+  geom_point(position = position_jitter(width = 0.1), 
+             size = 2.5, alpha = 0.7, shape = 16, stroke = 0) +
+  scale_fill_manual(values = triplet_colors) +
+  scale_x_discrete(labels = triplet_labels) +
+  scale_y_continuous(limits = c(y_min, y_max),
+                     breaks = seq(1, 9, 0.5),
+                     expand = expansion(mult = c(0.02, 0.05))) +
+  labs(
+    title = "Karolinska Sleepiness Scale under light exposure triplets",
+    subtitle = "Mean third-day KSS scores per triplet type (1.5-h exposure; P07 excluded)",
+    x = "Triplet", 
+    y = expression(atop("Mean KSS", 
+                        scriptstyle("(1 = Extremely alert; 9 = Very sleepy)")))
+  ) +
+  theme_classic(base_size = 14) +
+  theme(
+    aspect.ratio = 1,
+
+    # Added to match all previous plots
+    plot.title = element_text(size = 16, hjust = 0),
+    plot.subtitle = element_text(size = 13, hjust = 0, margin = margin(b = 10)),
+
+    axis.text = element_text(color = "black", size = 11),
+    axis.text.x = element_text(size = 9),
+    axis.text.y = element_text(size = 13),
+    axis.title = element_text(size = 14),
+    axis.title.x = element_text(margin = margin(t = 8)),
+    axis.title.y = element_text(margin = margin(r = 8)),
+    panel.grid.major.y = element_line(color = "grey90", linewidth = 0.3),
+    legend.position = "none",
+    plot.margin = margin(15, 10, 10, 10)
+  )
+```
+
+##### Data Overview: Triplet Observations
+```{r}
+#| label: triplet-overview-intervention
+
+# Create detailed overview table
+triplet_overview_q789 <- triplet_kss_all_q789 %>%
+  filter(participant != "P07", !is.na(pos3_kss)) %>%
+  select(participant, triplet, pos1_kss, pos2_kss, pos3_kss) %>%
+  arrange(participant, triplet)
+
+triplet_overview_q789
+```
+
+### Triplet Position Trajectory
+
+#### Full Session (5-hour exposure)
+
+**Mean KSS trajectory across triplet positions**
+```{r}
+#| label: fig-triplet-position-5h
+#| fig-cap: "Mean KSS trajectory across triplet positions (5-h exposure, P07 excluded)"
+#| fig-width: 8
+#| fig-height: 8
+
+# Prepare position data using full 5h window
+mean_triplet_pos_5h <- triplet_kss_all %>%
+  filter(participant != "P07") %>%
+  group_by(triplet) %>%
+  summarise(
+    pos1_mean = mean(pos1_kss, na.rm = TRUE),
+    pos2_mean = mean(pos2_kss, na.rm = TRUE),
+    pos3_mean = mean(pos3_kss, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  pivot_longer(cols = c(pos1_mean, pos2_mean, pos3_mean), 
+               names_to = "position", values_to = "mean_kss") %>%
+  mutate(
+    position_num = case_when(
+      position == "pos1_mean" ~ 1,
+      position == "pos2_mean" ~ 2,
+      position == "pos3_mean" ~ 3
+    ),
+    light_type = substr(triplet, position_num, position_num),
+    light_label = ifelse(light_type == "D", "dim", "bright"),
+    triplet = factor(triplet, levels = c("DDD", "BDD", "DBD", "BBD", 
+                                        "DDB", "BDB", "DBB", "BBB"))
+  ) %>%
+  filter(!is.na(mean_kss))
+
+# Calculate y-axis limits
+y_min <- floor(min(mean_triplet_pos_5h$mean_kss[is.finite(mean_triplet_pos_5h$mean_kss)]) * 2) / 2
+y_max <- ceiling(max(mean_triplet_pos_5h$mean_kss[is.finite(mean_triplet_pos_5h$mean_kss)]) * 2) / 2
+
+# Create plot
+ggplot(mean_triplet_pos_5h, aes(x = position_num, y = mean_kss, group = triplet)) +
+  geom_line(color = "grey60", linewidth = 0.6, alpha = 0.7) +
+  geom_point(aes(color = light_label), size = 3.5, shape = 16) +
+  scale_color_manual(values = light_colors,
+                     labels = c("dim" = "Dim (10 lx)", 
+                                "bright" = "Bright (1000 lx)")) +
+  scale_x_continuous(breaks = c(1, 2, 3), 
+                     labels = c("Position 1", "Position 2", "Position 3"), 
+                     limits = c(0.8, 3.2)) +
+  scale_y_continuous(limits = c(y_min, y_max),
+                     breaks = seq(1, 9, 0.5),
+                     expand = expansion(mult = c(0.05, 0.05))) +
+  labs(
+    title = "Karolinska Sleepiness Scale across light exposure triplets",
+    subtitle = "Mean KSS scores across all participants (5-h exposure; P07 excluded)",
+    x = "Triplet position", 
+    y = expression(atop("Mean KSS", 
+                        scriptstyle("(1 = Extremely alert; 9 = Very sleepy)"))),
+    color = "Light condition"
+  ) +
+  theme_classic(base_size = 14) +
+  theme(
+    aspect.ratio = 1,
+
+    # Title & subtitle sizes aligned with all previous plots
+    plot.title = element_text(size = 16, hjust = 0),
+    plot.subtitle = element_text(size = 13, hjust = 0, margin = margin(b = 10)),
+
+    axis.text = element_text(color = "black", size = 13),
+    axis.title = element_text(size = 14),
+    axis.title.x = element_text(margin = margin(t = 8)),
+    axis.title.y = element_text(margin = margin(r = 8)),
+    panel.grid.major.y = element_line(color = "grey90", linewidth = 0.3),
+
+    legend.position = "right",
+    legend.title = element_text(size = 13),
+    legend.text = element_text(size = 12),
+
+    plot.margin = margin(15, 10, 10, 10)
+  )
+```
+
+#### Intervention Window (1.5-hour exposure)
+
+**Mean KSS trajectory across triplet positions**
+```{r}
+#| label: fig-triplet-position-intervention
+#| fig-cap: "Mean KSS trajectory across triplet positions (1.5-h intervention window, P07 excluded)"
+#| fig-width: 8
+#| fig-height: 8
+
+# Prepare position data using intervention window
+mean_triplet_pos_q789 <- triplet_kss_all_q789 %>%
+  filter(participant != "P07") %>%
+  group_by(triplet) %>%
+  summarise(
+    pos1_mean = mean(pos1_kss, na.rm = TRUE),
+    pos2_mean = mean(pos2_kss, na.rm = TRUE),
+    pos3_mean = mean(pos3_kss, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  pivot_longer(cols = c(pos1_mean, pos2_mean, pos3_mean), 
+               names_to = "position", values_to = "mean_kss") %>%
+  mutate(
+    position_num = case_when(
+      position == "pos1_mean" ~ 1,
+      position == "pos2_mean" ~ 2,
+      position == "pos3_mean" ~ 3
+    ),
+    light_type = substr(triplet, position_num, position_num),
+    light_label = ifelse(light_type == "D", "dim", "bright"),
+    triplet = factor(triplet, levels = c("DDD", "BDD", "DBD", "BBD", 
+                                        "DDB", "BDB", "DBB", "BBB"))
+  ) %>%
+  filter(!is.na(mean_kss))
+
+# Calculate y-axis limits
+y_min <- floor(min(mean_triplet_pos_q789$mean_kss[is.finite(mean_triplet_pos_q789$mean_kss)]) * 2) / 2
+y_max <- ceiling(max(mean_triplet_pos_q789$mean_kss[is.finite(mean_triplet_pos_q789$mean_kss)]) * 2) / 2
+
+# Create plot
+ggplot(mean_triplet_pos_q789, aes(x = position_num, y = mean_kss, group = triplet)) +
+  geom_line(color = "grey60", linewidth = 0.6, alpha = 0.7) +
+  geom_point(aes(color = light_label), size = 3.5, shape = 16) +
+  scale_color_manual(values = light_colors,
+                     labels = c("dim" = "Dim (10 lx)", 
+                               "bright" = "Bright (1000 lx)")) +
+  scale_x_continuous(breaks = c(1, 2, 3), 
+                     labels = c("Position 1", "Position 2", "Position 3"), 
+                     limits = c(0.8, 3.2)) +
+  scale_y_continuous(limits = c(y_min, y_max),
+                     breaks = seq(1, 9, 0.5),
+                     expand = expansion(mult = c(0.05, 0.05))) +
+  labs(title = "Karolinska Sleepiness Scale across light exposure triplets",
+    subtitle = "Mean KSS scores across all participants (1.5-h exposure; P07 excluded)",
+    x = "Triplet position", 
+       y = expression(atop("Mean KSS", 
+                           scriptstyle("(1 = Extremely alert; 9 = Very sleepy)"))),
+       color = "Light condition") +
+  theme_classic(base_size = 14) +
+  theme(
+    aspect.ratio = 1,
+    axis.text = element_text(color = "black", size = 13),
+    axis.title = element_text(size = 14),
+    axis.title.x = element_text(margin = margin(t = 8)),
+    axis.title.y = element_text(margin = margin(r = 8)),
+    panel.grid.major.y = element_line(color = "grey90", linewidth = 0.3),
+    legend.position = "right",
+    legend.title = element_text(size = 13),
+    legend.text = element_text(size = 12),
+    plot.margin = margin(15, 10, 10, 10)
+  )
+```
+
+### Triplet Intervention Window Summary Statistics (Boxplots)
+```{r}
+# Calculate statistics for 5-h exposure (full session)
+triplet_stats_5h <- triplet_kss_all %>%
+  filter(participant != "P07", !is.na(pos3_kss)) %>%
+  select(triplet, pos3_kss) %>%
+  group_by(triplet) %>%
+  summarise(
+    n_5h = n(),
+    median_5h = median(pos3_kss, na.rm = TRUE),
+    IQR_5h = IQR(pos3_kss, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Calculate statistics for 1.5-h exposure (intervention window)
+triplet_stats_1.5h <- triplet_kss_all_q789 %>%
+  filter(participant != "P07", !is.na(pos3_kss)) %>%
+  select(triplet, pos3_kss) %>%
+  group_by(triplet) %>%
+  summarise(
+    n_1.5h = n(),
+    median_1.5h = median(pos3_kss, na.rm = TRUE),
+    IQR_1.5h = IQR(pos3_kss, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Combine both exposure windows
+triplet_stats_combined <- triplet_stats_5h %>%
+  full_join(triplet_stats_1.5h, by = "triplet") %>%
+  mutate(triplet = factor(triplet, levels = c("DDD", "BDD", "DBD", "BBD",
+                                              "DDB", "BDB", "DBB", "BBB"))) %>%
+  arrange(triplet)
+
+# Display as formatted table
+knitr::kable(
+  triplet_stats_combined,
+  digits = 2,
+  col.names = c("Triplet", "N", "Median", "IQR", "N", "Median", "IQR"),
+  caption = "Descriptive statistics for triplet third-day KSS scores across exposure windows (P07 excluded)",
+  align = c("l", rep("r", 6))
+) %>%
+  kableExtra::add_header_above(c(" " = 1, "5-h Exposure" = 3, "1.5-h Exposure" = 3))
+```
+
+## Triplet Time-Course Analysis
+
+### Data Preparation
+```{r}
+# Participants and triplets (already defined in setup)
+participants_noP07 <- c("P01", "P02", "P03", "P04", "P05", "P06", "P09", "P10")
+triplets_all <- c("DDD", "DDB", "DBD", "DBB", "BDD", "BDB", "BBD", "BBB")
+
+# Reuse triplet definition functions 
+# Define light patterns for groups 
+light_g1 <- unlist(strsplit("DDDBBBDDBDB", ""))
+light_g2 <- unlist(strsplit("DBBBDDDBDB", ""))
+light_g4_orig <- unlist(strsplit("DDDBXDBBBDBDD", ""))
+
+# Create triplet dataframes for each group
+df_triplets_g1 <- data.frame(
+  session_1 = 1:(length(light_g1)-2),
+  session_2 = 2:(length(light_g1)-1),
+  session_3 = 3:length(light_g1),
+  triplet = sapply(1:(length(light_g1)-2), function(i) paste0(light_g1[i:(i+2)], collapse = ""))
+)
+
+df_triplets_g2 <- data.frame(
+  session_1 = 1:(length(light_g2)-2),
+  session_2 = 2:(length(light_g2)-1),
+  session_3 = 3:length(light_g2),
+  triplet = sapply(1:(length(light_g2)-2), function(i) paste0(light_g2[i:(i+2)], collapse = ""))
+)
+
+# Function to get session 3 for each triplet type
+get_triplet_session3_kss <- function(p, triplet_type) {
+  if(p %in% c("P01", "P02", "P03")) {
+    df_triplets <- df_triplets_g1
+  } else if(p %in% c("P04", "P05", "P06", "P09")) {
+    df_triplets <- df_triplets_g2
+  } else {
+    df_triplets <- data.frame(
+      session_1 = 1:(length(light_g4_orig)-2),
+      session_2 = 2:(length(light_g4_orig)-1),
+      session_3 = 3:length(light_g4_orig),
+      triplet = sapply(1:(length(light_g4_orig)-2), function(i) 
+        paste0(light_g4_orig[i:(i+2)], collapse = ""))
+    ) %>%
+      filter(!str_detect(triplet, "X")) %>%
+      filter(session_1 != 5 & session_2 != 5 & session_3 != 5)
+  }
+  
+  sessions_3 <- df_triplets %>%
+    filter(triplet == triplet_type) %>%
+    pull(session_3)
+  
+  return(sessions_3)
+}
+
+# Function to get all participant-session combinations for a triplet
+get_triplet_sessions_overview_kss <- function(triplet_type) {
+  overview <- data.frame()
+  
+  for(p in participants_noP07) {
+    sessions_3 <- get_triplet_session3_kss(p, triplet_type)
+    
+    if(length(sessions_3) > 0) {
+      for(s in sessions_3) {
+        overview <- rbind(overview, data.frame(
+          participant_id = p,
+          session = s
+        ))
+      }
+    }
+  }
+  
+  return(overview %>% arrange(session, participant_id))
+}
+
+# Function to create plot for one triplet type
+plot_triplet_timecourse_kss <- function(triplet_type) {
+  df_triplet_kss <- data.frame()
+  
+  for(p in participants_noP07) {
+    sessions_3 <- get_triplet_session3_kss(p, triplet_type)
+    
+    if(length(sessions_3) > 0) {
+      # Get KSS data for these sessions
+      p_data <- insess_surv %>%
+        mutate(
+          session_raw = as.integer(str_extract(session, "\\d+$")),
+          exp_session = case_when(
+            id %in% c("P01", "P02", "P03") ~ session_raw - 100,
+            id %in% c("P04", "P05") ~ session_raw - 200,
+            id %in% c("P06", "P07", "P09") ~ session_raw - 300,
+            id == "P10" ~ session_raw - 400,
+            TRUE ~ NA_real_
+          )
+        ) %>%
+        filter(id == p, exp_session %in% sessions_3) %>%
+        select(id, ques_numb, kss)
+      
+      df_triplet_kss <- rbind(df_triplet_kss, p_data)
+    }
+  }
+  
+  triplet_summary <- df_triplet_kss %>%
+    group_by(ques_numb) %>%
+    summarise(
+      mean_kss = mean(kss, na.rm = TRUE),
+      sd_kss = sd(kss, na.rm = TRUE),
+      n = n(),
+      .groups = "drop"
+    ) %>%
+    mutate(ques_numb = as.numeric(ques_numb))
+  
+  y_min <- floor(min(triplet_summary$mean_kss - triplet_summary$sd_kss, 
+                     na.rm = TRUE) * 2) / 2 - 0.1
+  y_max <- ceiling(max(triplet_summary$mean_kss + triplet_summary$sd_kss, 
+                       na.rm = TRUE) * 2) / 2 + 0.3
+  
+  hbt_values <- c("5.5h", "5h", "4.5h", "4h", "3.5h", "3h", 
+                  "2.5h", "2h", "1.5h", "1h", "0.5h")
+  
+  # Determine third letter and intervention color/label
+  third_letter <- substr(triplet_type, 3, 3)
+  intervention_color <- ifelse(third_letter == "D", "#F5F5F5", "#FFF9E6")
+  intervention_alpha <- ifelse(third_letter == "D", 0.4, 0.8)
+  intervention_label <- ifelse(third_letter == "D", "dim (10 lx)", "bright (1000 lx)")
+  
+  # Create title with bold third letter
+  triplet_first_two <- substr(triplet_type, 1, 2)
+  triplet_third <- substr(triplet_type, 3, 3)
+  
+  p <- ggplot(triplet_summary, aes(x = ques_numb, y = mean_kss)) +
+    annotate("rect", xmin = 1, xmax = 7, ymin = -Inf, ymax = Inf, 
+             fill = "#F5F5F5", alpha = 0.4) +
+    annotate("rect", xmin = 7, xmax = 10, ymin = -Inf, ymax = Inf, 
+             fill = intervention_color, alpha = intervention_alpha) +
+    annotate("rect", xmin = 10, xmax = 11, ymin = -Inf, ymax = Inf, 
+             fill = "#F5F5F5", alpha = 0.4) +
+    annotate("text", x = 3.75, y = y_max - 0.05, label = "dim (10 lx)", 
+             hjust = 0.5, vjust = 1, size = 3.5, color = "grey50", fontface = "italic") +
+    annotate("text", x = 8.5, y = y_max - 0.05, label = intervention_label, 
+             hjust = 0.5, vjust = 1, size = 3.5, 
+             color = ifelse(third_letter == "D", "grey50", "#B8860B"), 
+             fontface = "italic") +
+    annotate("text", x = 10.5, y = y_max - 0.05, label = "dim (10 lx)", 
+             hjust = 0.5, vjust = 1, size = 3.5, color = "grey50", fontface = "italic") +
+    geom_ribbon(aes(ymin = mean_kss - sd_kss,
+                    ymax = mean_kss + sd_kss),
+                alpha = 0.15, fill = "grey40") +
+    geom_line(linewidth = 0.8, color = "black") +
+    geom_point(size = 3.5, shape = 16, color = "black") +
+    scale_x_continuous(
+      breaks = 1:11,
+      labels = paste0("Q", 1:11, "\n(", hbt_values, ")"),
+      limits = c(0.5, 11.5),
+      expand = c(0, 0)
+    ) +
+    scale_y_continuous(limits = c(y_min, y_max), expand = c(0, 0)) +
+    labs(
+      title = bquote("KSS time course - Triplet " * 
+                     .(triplet_first_two) * bold(.(triplet_third))),
+      subtitle = paste0("Grand average third-day (n=", 
+                       length(unique(df_triplet_kss$id)), 
+                       " participants; P07 excluded)"),
+      x = "KSS question number (hours before HBT)",
+      y = expression(atop("Mean KSS ± SD", 
+                          scriptstyle("(1 = Extremely alert; 9 = Very sleepy)")))
+    ) +
+    theme_classic(base_size = 14) +
+    theme(
+      aspect.ratio = 1,
+      plot.title = element_text(size = 16, hjust = 0),
+      plot.subtitle = element_text(size = 13, hjust = 0, margin = margin(b = 10)),
+      axis.text = element_text(color = "black", size = 13),
+      axis.title = element_text(size = 14),
+      axis.title.x = element_text(margin = margin(t = 8)),
+      axis.title.y = element_text(margin = margin(r = 8)),
+      panel.grid.major.y = element_line(color = "grey90", linewidth = 0.3),
+      plot.margin = margin(15, 10, 10, 10)
+    )
+  
+  return(p)
+}
+```
+
+### DDD Triplet
+```{r}
+knitr::kable(get_triplet_sessions_overview_kss("DDD"),
+             caption = "Sessions used for Triplet DDD")
+```
+```{r}
+plot_triplet_timecourse_kss("DDD")
+```
+
+### DDB Triplet
+```{r}
+knitr::kable(get_triplet_sessions_overview_kss("DDB"),
+             caption = "Sessions used for Triplet DDB")
+```
+```{r}
+plot_triplet_timecourse_kss("DDB")
+```
+
+### DBD Triplet
+```{r}
+knitr::kable(get_triplet_sessions_overview_kss("DBD"),
+             caption = "Sessions used for Triplet DBD")
+```
+```{r}
+plot_triplet_timecourse_kss("DBD")
+```
+
+### DBB Triplet
+```{r}
+knitr::kable(get_triplet_sessions_overview_kss("DBB"),
+             caption = "Sessions used for Triplet DBB")
+```
+```{r}
+plot_triplet_timecourse_kss("DBB")
+```
+
+### BDD Triplet
+```{r}
+knitr::kable(get_triplet_sessions_overview_kss("BDD"),
+             caption = "Sessions used for Triplet BDD")
+```
+```{r}
+plot_triplet_timecourse_kss("BDD")
+```
+
+### BDB Triplet
+```{r}
+knitr::kable(get_triplet_sessions_overview_kss("BDB"),
+             caption = "Sessions used for Triplet BDB")
+```
+```{r}
+plot_triplet_timecourse_kss("BDB")
+```
+
+### BBD Triplet
+```{r}
+knitr::kable(get_triplet_sessions_overview_kss("BBD"),
+             caption = "Sessions used for Triplet BBD")
+```
+```{r}
+plot_triplet_timecourse_kss("BBD")
+```
+
+### BBB Triplet
+```{r}
+knitr::kable(get_triplet_sessions_overview_kss("BBB"),
+             caption = "Sessions used for Triplet BBB")
+```
+```{r}
+plot_triplet_timecourse_kss("BBB")
+```
+
+### Panel Plot: Dim-Ending Triplets (DDD, BDD, DBD, BBD)
+```{r}
+# Prepare data for all D-ending triplets
+triplets_D_panel <- c("DDD", "BDD", "DBD", "BBD")
+
+df_all_D_triplets_kss <- data.frame()
+
+for(triplet_type in triplets_D_panel) {
+  df_triplet_kss <- data.frame()
+  
+  for(p in participants_noP07) {
+    sessions_3 <- get_triplet_session3_kss(p, triplet_type)
+    
+    if(length(sessions_3) > 0) {
+      p_data <- insess_surv %>%
+        mutate(
+          session_raw = as.integer(str_extract(session, "\\d+$")),
+          exp_session = case_when(
+            id %in% c("P01", "P02", "P03") ~ session_raw - 100,
+            id %in% c("P04", "P05") ~ session_raw - 200,
+            id %in% c("P06", "P07", "P09") ~ session_raw - 300,
+            id == "P10" ~ session_raw - 400,
+            TRUE ~ NA_real_
+          )
+        ) %>%
+        filter(id == p, exp_session %in% sessions_3) %>%
+        select(id, ques_numb, kss) %>%
+        mutate(triplet = triplet_type)
+      
+      df_triplet_kss <- rbind(df_triplet_kss, p_data)
+    }
+  }
+  
+  df_all_D_triplets_kss <- rbind(df_all_D_triplets_kss, df_triplet_kss)
+}
+
+# Calculate summary per triplet
+triplet_summary_D_kss <- df_all_D_triplets_kss %>%
+  group_by(triplet, ques_numb) %>%
+  summarise(
+    mean_kss = mean(kss, na.rm = TRUE),
+    sd_kss = sd(kss, na.rm = TRUE),
+    n = n(),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    ques_numb = as.numeric(ques_numb),
+    triplet = factor(triplet, levels = triplets_D_panel)
+  )
+
+# Y-axis limits for D-ending triplets
+y_min_panel_D <- floor(min(triplet_summary_D_kss$mean_kss - triplet_summary_D_kss$sd_kss, 
+                           na.rm = TRUE) * 2) / 2 - 0.1
+y_max_panel_D <- ceiling(max(triplet_summary_D_kss$mean_kss + triplet_summary_D_kss$sd_kss, 
+                             na.rm = TRUE) * 2) / 2 + 0.3
+
+hbt_values <- c("5.5h", "5h", "4.5h", "4h", "3.5h", "3h", 
+                "2.5h", "2h", "1.5h", "1h", "0.5h")
+
+# Create panel plot
+ggplot(triplet_summary_D_kss, aes(x = ques_numb, y = mean_kss)) +
+  annotate("rect", xmin = 1, xmax = 7, ymin = -Inf, ymax = Inf, 
+           fill = "#F5F5F5", alpha = 0.4) +
+  annotate("rect", xmin = 7, xmax = 10, ymin = -Inf, ymax = Inf, 
+           fill = "#F5F5F5", alpha = 0.4) +
+  annotate("rect", xmin = 10, xmax = 11, ymin = -Inf, ymax = Inf, 
+           fill = "#F5F5F5", alpha = 0.4) +
+  geom_ribbon(aes(ymin = mean_kss - sd_kss,
+                  ymax = mean_kss + sd_kss),
+              alpha = 0.15, fill = "grey40") +
+  geom_line(linewidth = 0.8, color = "black") +
+  geom_point(size = 2.5, shape = 16, color = "black") +
+  scale_x_continuous(
+    breaks = 1:11,
+    labels = paste0("Q", 1:11, "\n(", hbt_values, ")"),
+    limits = c(0.5, 11.5),
+    expand = c(0, 0)
+  ) +
+  scale_y_continuous(limits = c(y_min_panel_D, y_max_panel_D), expand = c(0, 0)) +
+  facet_wrap(~ triplet, ncol = 2, 
+             labeller = labeller(triplet = function(x) {
+               sapply(x, function(t) {
+                 first_two <- substr(t, 1, 2)
+                 third <- substr(t, 3, 3)
+                 paste0(first_two, third)
+               })
+             })) +
+  labs(
+    title = "KSS time course - Dim-ending triplets",
+    subtitle = "Grand average third-day (P07 excluded)",
+    x = "KSS question number (hours before HBT)",
+    y = expression(atop("Mean KSS", 
+                        scriptstyle("(1 = Extremely alert; 9 = Very sleepy)")))
+  ) +
+  theme_classic(base_size = 14) +
+  theme(
+    plot.title = element_text(size = 16, hjust = 0),
+    plot.subtitle = element_text(size = 13, hjust = 0, margin = margin(b = 10)),
+    axis.text = element_text(color = "black", size = 11),
+    axis.title = element_text(size = 13),
+    axis.title.x = element_text(margin = margin(t = 8)),
+    axis.title.y = element_text(margin = margin(r = 8)),
+    panel.grid.major.y = element_line(color = "grey90", linewidth = 0.3),
+    strip.background = element_rect(fill = "white", color = "grey80", linewidth = 0.5),
+    strip.text = element_text(size = 12, color = "black", face = "bold"),
+    plot.margin = margin(15, 10, 10, 10)
+  )
+```
+
+### Panel Plot: Bright-Ending Triplets (DDB, BDB, DBB, BBB)
+```{r}
+# Prepare data for all B-ending triplets
+triplets_B_panel <- c("DDB", "BDB", "DBB", "BBB")
+
+df_all_B_triplets_kss <- data.frame()
+
+for(triplet_type in triplets_B_panel) {
+  df_triplet_kss <- data.frame()
+  
+  for(p in participants_noP07) {
+    sessions_3 <- get_triplet_session3_kss(p, triplet_type)
+    
+    if(length(sessions_3) > 0) {
+      p_data <- insess_surv %>%
+        mutate(
+          session_raw = as.integer(str_extract(session, "\\d+$")),
+          exp_session = case_when(
+            id %in% c("P01", "P02", "P03") ~ session_raw - 100,
+            id %in% c("P04", "P05") ~ session_raw - 200,
+            id %in% c("P06", "P07", "P09") ~ session_raw - 300,
+            id == "P10" ~ session_raw - 400,
+            TRUE ~ NA_real_
+          )
+        ) %>%
+        filter(id == p, exp_session %in% sessions_3) %>%
+        select(id, ques_numb, kss) %>%
+        mutate(triplet = triplet_type)
+      
+      df_triplet_kss <- rbind(df_triplet_kss, p_data)
+    }
+  }
+  
+  df_all_B_triplets_kss <- rbind(df_all_B_triplets_kss, df_triplet_kss)
+}
+
+# Calculate summary per triplet
+triplet_summary_B_kss <- df_all_B_triplets_kss %>%
+  group_by(triplet, ques_numb) %>%
+  summarise(
+    mean_kss = mean(kss, na.rm = TRUE),
+    sd_kss = sd(kss, na.rm = TRUE),
+    n = n(),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    ques_numb = as.numeric(ques_numb),
+    triplet = factor(triplet, levels = triplets_B_panel)
+  )
+
+# Y-axis limits for B-ending triplets
+y_min_panel_B <- floor(min(triplet_summary_B_kss$mean_kss - triplet_summary_B_kss$sd_kss, 
+                           na.rm = TRUE) * 2) / 2 - 0.1
+y_max_panel_B <- ceiling(max(triplet_summary_B_kss$mean_kss + triplet_summary_B_kss$sd_kss, 
+                             na.rm = TRUE) * 2) / 2 + 0.3
+
+hbt_values <- c("5.5h", "5h", "4.5h", "4h", "3.5h", "3h", 
+                "2.5h", "2h", "1.5h", "1h", "0.5h")
+
+# Create panel plot
+ggplot(triplet_summary_B_kss, aes(x = ques_numb, y = mean_kss)) +
+  annotate("rect", xmin = 1, xmax = 7, ymin = -Inf, ymax = Inf, 
+           fill = "#F5F5F5", alpha = 0.4) +
+  annotate("rect", xmin = 7, xmax = 10, ymin = -Inf, ymax = Inf, 
+           fill = "#FFF9E6", alpha = 0.8) +
+  annotate("rect", xmin = 10, xmax = 11, ymin = -Inf, ymax = Inf, 
+           fill = "#F5F5F5", alpha = 0.4) +
+  geom_ribbon(aes(ymin = mean_kss - sd_kss,
+                  ymax = mean_kss + sd_kss),
+              alpha = 0.15, fill = "grey40") +
+  geom_line(linewidth = 0.8, color = "black") +
+  geom_point(size = 2.5, shape = 16, color = "black") +
+  scale_x_continuous(
+    breaks = 1:11,
+    labels = paste0("Q", 1:11, "\n(", hbt_values, ")"),
+    limits = c(0.5, 11.5),
+    expand = c(0, 0)
+  ) +
+  scale_y_continuous(limits = c(y_min_panel_B, y_max_panel_B), expand = c(0, 0)) +
+  facet_wrap(~ triplet, ncol = 2, 
+             labeller = labeller(triplet = function(x) {
+               sapply(x, function(t) {
+                 first_two <- substr(t, 1, 2)
+                 third <- substr(t, 3, 3)
+                 paste0(first_two, third)
+               })
+             })) +
+  labs(
+    title = "KSS time course - Bright-ending triplets",
+    subtitle = "Grand average third-day (P07 excluded)",
+    x = "KSS question number (hours before HBT)",
+    y = expression(atop("Mean KSS", 
+                        scriptstyle("(1 = Extremely alert; 9 = Very sleepy)")))
+  ) +
+  theme_classic(base_size = 14) +
+  theme(
+    plot.title = element_text(size = 16, hjust = 0),
+    plot.subtitle = element_text(size = 13, hjust = 0, margin = margin(b = 10)),
+    axis.text = element_text(color = "black", size = 11),
+    axis.title = element_text(size = 13),
+    axis.title.x = element_text(margin = margin(t = 8)),
+    axis.title.y = element_text(margin = margin(r = 8)),
+    panel.grid.major.y = element_line(color = "grey90", linewidth = 0.3),
+    strip.background = element_rect(fill = "white", color = "grey80", linewidth = 0.5),
+    strip.text = element_text(size = 12, color = "black", face = "bold"),
+    plot.margin = margin(15, 10, 10, 10)
+  )
+```
+
+### Grand Average with D-ending and B-ending rows
+```{r fig.width=14, fig.height=8}
+# Prepare data for all triplets
+triplets_all_panel <- c("DDD", "BDD", "DBD", "BBD", "DDB", "BDB", "DBB", "BBB")
+
+df_all_triplets_unified_kss <- data.frame()
+
+for(triplet_type in triplets_all_panel) {
+  df_triplet_kss <- data.frame()
+  
+  for(p in participants_noP07) {
+    sessions_3 <- get_triplet_session3_kss(p, triplet_type)
+    
+    if(length(sessions_3) > 0) {
+      p_data <- insess_surv %>%
+        mutate(
+          session_raw = as.integer(str_extract(session, "\\d+$")),
+          exp_session = case_when(
+            id %in% c("P01", "P02", "P03") ~ session_raw - 100,
+            id %in% c("P04", "P05") ~ session_raw - 200,
+            id %in% c("P06", "P07", "P09") ~ session_raw - 300,
+            id == "P10" ~ session_raw - 400,
+            TRUE ~ NA_real_
+          )
+        ) %>%
+        filter(id == p, exp_session %in% sessions_3) %>%
+        select(id, ques_numb, kss) %>%
+        mutate(triplet = triplet_type)
+      
+      df_triplet_kss <- rbind(df_triplet_kss, p_data)
+    }
+  }
+  
+  df_all_triplets_unified_kss <- rbind(df_all_triplets_unified_kss, df_triplet_kss)
+}
+
+# Calculate summary per triplet
+triplet_summary_unified_kss <- df_all_triplets_unified_kss %>%
+  group_by(triplet, ques_numb) %>%
+  summarise(
+    mean_kss = mean(kss, na.rm = TRUE),
+    sd_kss = sd(kss, na.rm = TRUE),
+    n = n(),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    ques_numb = as.numeric(ques_numb),
+    triplet = factor(triplet, levels = triplets_all_panel)
+  )
+
+# Unified Y-axis limits
+y_min_unified <- floor(min(triplet_summary_unified_kss$mean_kss - triplet_summary_unified_kss$sd_kss, 
+                           na.rm = TRUE) * 2) / 2 - 0.1
+y_max_unified <- ceiling(max(triplet_summary_unified_kss$mean_kss + triplet_summary_unified_kss$sd_kss, 
+                             na.rm = TRUE) * 2) / 2 + 0.3
+
+# Function to create triplet plot
+create_triplet_plot <- function(triplet_name, show_x = FALSE, show_y = TRUE) {
+  data_triplet <- triplet_summary_unified_kss %>%
+    filter(triplet == triplet_name)
+  
+  triplet_third <- substr(triplet_name, 3, 3)
+  intervention_color <- ifelse(triplet_third == "D", "#F5F5F5", "#FFF9E6")
+  intervention_alpha <- ifelse(triplet_third == "D", 0.4, 0.8)
+  
+  # Only third letter bold: DD**D**
+  triplet_first_two <- substr(triplet_name, 1, 2)
+  triplet_label <- paste0(triplet_first_two, "**", triplet_third, "**")
+  
+  ggplot(data_triplet, aes(x = ques_numb, y = mean_kss)) +
+    annotate("rect", xmin = 1, xmax = 7, ymin = -Inf, ymax = Inf, 
+             fill = "#F5F5F5", alpha = 0.4) +
+    annotate("rect", xmin = 7, xmax = 10, ymin = -Inf, ymax = Inf, 
+             fill = intervention_color, alpha = intervention_alpha) +
+    annotate("rect", xmin = 10, xmax = 11, ymin = -Inf, ymax = Inf, 
+             fill = "#F5F5F5", alpha = 0.4) +
+    geom_ribbon(aes(ymin = mean_kss - sd_kss, ymax = mean_kss + sd_kss),
+                alpha = 0.15, fill = "grey40") +
+    geom_line(linewidth = 0.8, color = "black") +
+    geom_point(size = 2.5, shape = 16, color = "black") +
+    scale_x_continuous(
+      breaks = 1:11,
+      labels = if(show_x) c("Q1\n(5.5h)", "Q2", "Q3\n(4.5h)", "Q4", "Q5\n(3.5h)", 
+                             "Q6", "Q7\n(2.5h)", "Q8", "Q9\n(1.5h)", "Q10", "Q11") else 1:11,
+      limits = c(0.5, 11.5),
+      expand = c(0, 0)
+    ) +
+    scale_y_continuous(limits = c(y_min_unified, y_max_unified), expand = c(0, 0)) +
+    labs(
+      title = triplet_label,
+      x = NULL,
+      y = if(show_y) expression(atop("Mean KSS ± SD", 
+                        scriptstyle("(1 = Extremely alert; 9 = Very sleepy)"))) else NULL
+    ) +
+    theme_classic(base_size = 11) +
+    theme(
+      plot.title = element_markdown(size = 11, hjust = 0.5, margin = margin(b = 5)),
+      axis.text = element_text(color = "black", size = 9),
+      axis.text.x = element_text(size = 8),
+      axis.title = element_text(size = 10),
+      axis.title.y = element_text(margin = margin(r = 5)),
+      panel.grid.major.y = element_line(color = "grey90", linewidth = 0.3),
+      plot.margin = margin(5, 5, 5, 5)
+    )
+}
+
+# Create D-ending triplet plots (no x-axis labels)
+p_DDD <- create_triplet_plot("DDD", show_x = FALSE, show_y = TRUE)
+p_BDD <- create_triplet_plot("BDD", show_x = FALSE, show_y = FALSE)
+p_DBD <- create_triplet_plot("DBD", show_x = FALSE, show_y = FALSE)
+p_BBD <- create_triplet_plot("BBD", show_x = FALSE, show_y = FALSE)
+
+# Create B-ending triplet plots (with x-axis labels)
+p_DDB <- create_triplet_plot("DDB", show_x = TRUE, show_y = TRUE)
+p_BDB <- create_triplet_plot("BDB", show_x = TRUE, show_y = FALSE)
+p_DBB <- create_triplet_plot("DBB", show_x = TRUE, show_y = FALSE)
+p_BBB <- create_triplet_plot("BBB", show_x = TRUE, show_y = FALSE)
+
+# Grand Average plot 
+p_grand <- ggplot(grand_summary_all, 
+       aes(x = ques_numb, y = mean_kss, 
+           color = light_type, fill = light_type, group = light_type)) +
+  annotate("rect", xmin = 1, xmax = 7, ymin = -Inf, ymax = Inf, 
+           fill = "#F5F5F5", alpha = 0.4) +
+  annotate("rect", xmin = 10, xmax = 11, ymin = -Inf, ymax = Inf, 
+           fill = "#F5F5F5", alpha = 0.4) +
+  annotate("rect", xmin = 7, xmax = 10, ymin = -Inf, ymax = Inf, 
+           fill = "#FFF9E6", alpha = 0.8) +
+  geom_ribbon(aes(ymin = mean_kss - se_kss, ymax = mean_kss + se_kss), 
+              alpha = 0.1, color = NA, show.legend = FALSE) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 2.5, shape = 16) +
+  scale_color_manual(
+    values = c("BRIGHT" = "#F5A623", "DIM" = "#4A90E2"),
+    labels = c("BRIGHT" = "Bright (1000 lx)", "DIM" = "Dim (10 lx)")
+  ) +
+  scale_fill_manual(
+    values = c("BRIGHT" = "#F5A623", "DIM" = "#4A90E2"),
+    labels = c("BRIGHT" = "Bright (1000 lx)", "DIM" = "Dim (10 lx)")
+  ) +
+  scale_x_continuous(
+    breaks = 1:11,
+    labels = 1:11,
+    limits = c(0.5, 11.5),
+    expand = c(0, 0)
+  ) +
+  scale_y_continuous(limits = c(y_min_unified, y_max_unified), expand = c(0, 0)) +
+  labs(
+    title = "Grand Average",
+    x = NULL,
+    y = NULL,
+    color = "Light condition"
+  ) +
+  guides(
+    color = guide_legend(override.aes = list(shape = 16, size = 2.5)),
+    fill = "none"
+  ) +
+  theme_classic(base_size = 11) +
+  theme(
+    plot.title = element_text(size = 11, hjust = 0.5, face = "bold", margin = margin(b = 5)),
+    axis.text = element_text(color = "black", size = 9),
+    axis.text.x = element_text(size = 9),  # Same size as triplet plots
+    axis.title = element_text(size = 10),
+    panel.grid.major.y = element_line(color = "grey90", linewidth = 0.3),
+    legend.position = "bottom",
+    legend.title = element_text(size = 9),
+    legend.text = element_text(size = 8),
+    plot.margin = margin(5, 5, 5, 5)
+  )
+
+# Empty spacer
+p_spacer <- ggplot() + theme_void()
+
+# Combine in layout:
+# Row 1: DDD, BDD, DBD, BBD, Grand Average
+# Row 2: DDB, BDB, DBB, BBB, Spacer
+(p_DDD | p_BDD | p_DBD | p_BBD | p_grand) /
+(p_DDB | p_BDB | p_DBB | p_BBB | p_spacer) +
+  plot_annotation(
+    title = "KSS time course - Grand average and triplet patterns",
+    subtitle = "Grand average and third-day triplet patterns (P07 excluded)",
+    caption = "KSS questionnaire number (hours before HBT)",
+    theme = theme(
+      plot.title = element_text(size = 15, hjust = 0, face = "plain"),
+      plot.subtitle = element_text(size = 12, hjust = 0, margin = margin(b = 8)),
+      plot.caption = element_text(size = 11, hjust = 0.5, margin = margin(t = 8))
+    )
+  )
+```
+
+
+# Data Preparaton for Statistical Analysis
+
+## Prepare Data for Linear Mixed Models
+
+```{r}
+#| label: lmm-data-prep
+
+# Add participant demographics
+participant_demographics <- tibble(
+  participant_id = c("P01", "P02", "P03", "P04", "P05", "P06", "P09", "P10"),
+  sex = c("female", "male", "female", "female", "male", 
+          "female", "female", "male"),
+  age = c(24, 21, 24, 23, 31, 23, 28, 32)
+)
+
+# Prepare LMM dataset with lagged light exposure
+kss_lmm <- map_dfr(participant_list, function(pid) {
+  # Get KSS data
+  df <- kss_per_evening_q789 %>%
+    filter(participant_id == pid) %>%
+    select(participant_id, exp_session, mean_kss)
+  
+  # Add light conditions
+  light_df <- tibble(
+    exp_session = seq_along(light_patterns[[pid]]),
+    Light_Lag0 = light_patterns[[pid]]
+  )
+  
+  df %>% left_join(light_df, by = "exp_session")
+})
+
+# Create lagged variables and numeric coding
+kss_lmm <- kss_lmm %>%
+  group_by(participant_id) %>%
+  arrange(exp_session) %>%
+  mutate(
+    # Lag 1 = previous evening
+    Light_Lag1 = lag(Light_Lag0, 1),
+    # Lag 2 = two evenings ago
+    Light_Lag2 = lag(Light_Lag0, 2),
+    # Numeric coding: Dim=0, Bright=1
+    Light_Lag0_num = ifelse(Light_Lag0 == "D", 0, 1),
+    Light_Lag1_num = ifelse(Light_Lag1 == "D", 0, 1),
+    Light_Lag2_num = ifelse(Light_Lag2 == "D", 0, 1)
+  ) %>%
+  ungroup() %>%
+  # Remove rows with missing lags or excluded sessions
+  filter(!is.na(Light_Lag0) & !is.na(Light_Lag1) & !is.na(Light_Lag2)) %>%
+  filter(!(participant_id == "P10" & exp_session %in% c(6, 7))) %>%
+  # Add demographics
+  left_join(participant_demographics, by = "participant_id") %>%
+  # Center age for interpretability
+  mutate(age_c = age - mean(age))
+
+# Display prepared data
+cat("LMM dataset prepared:\n")
+cat("Total observations:", nrow(kss_lmm), "\n")
+cat("Participants:", paste(unique(kss_lmm$participant_id), collapse = ", "), "\n")
+kss_lmm %>% 
+  group_by(participant_id) %>% 
+  summarise(n_sessions = n(), .groups = "drop")
+
+# Display full dataset kss_lmm
+DT::datatable(kss_lmm, 
+              options = list(pageLength = 10, scrollX = TRUE),
+              caption = "Complete LMM dataset with lagged light exposure variables")
+```
+
+## KSS Trajectories Across Experimental Sessions
+
+Individual participant trajectories with LOESS smooth (full dataset, n=67 observations)
+```{r}
+#| label: fig-kss-trajectories
+#| fig-cap: "KSS across experimental sessions - Individual trajectories"
+#| fig-width: 10
+#| fig-height: 8
+
+# Prepare data - count observations per session
+session_counts <- kss_per_evening_q789 %>%
+  filter(participant_id != "P07") %>%  # Exclude P07
+  group_by(exp_session) %>%
+  summarise(n = n(), .groups = "drop")
+
+# Create plot
+ggplot(kss_per_evening_q789 %>% filter(participant_id != "P07"), 
+       aes(x = exp_session, y = mean_kss, color = participant_id, group = participant_id)) +
+  
+  # Individual trajectories
+  geom_line(alpha = 0.6, linewidth = 0.8) +
+  geom_point(size = 2.5, alpha = 0.7) +
+  
+  # LOESS smooth (overall trend)
+  geom_smooth(aes(group = 1), method = "loess", span = 0.75,
+              color = "black", linetype = "dashed", linewidth = 1.2,
+              se = TRUE, fill = "grey50", alpha = 0.3) +
+  
+  # Add sample size annotations
+  geom_text(data = session_counts %>% filter(n < 8),
+            aes(x = exp_session, y = 9, label = paste0("n=", n)),
+            color = "black", size = 3, inherit.aes = FALSE) +
+  
+  # Vertical line for data cutoff 
+  geom_vline(xintercept = 11.5, linetype = "dotted", color = "grey50", linewidth = 0.8) +
+  
+  # Scales
+  scale_x_continuous(
+    breaks = 1:13,
+    limits = c(2.5, 13.5),
+    expand = c(0.01, 0)
+  ) +
+  scale_y_continuous(
+    limits = c(0, 9.5),
+    breaks = seq(0, 9, 1),
+    expand = c(0, 0)
+  ) +
+  
+  # Colors
+  scale_color_manual(
+    values = c("P01" = "#E41A1C", "P02" = "#377EB8", "P03" = "#4DAF4A",
+               "P04" = "#984EA3", "P05" = "#FF7F00", "P06" = "#FFFF33",
+               "P09" = "#A65628", "P10" = "#F781BF"),
+    name = "Participant"
+  ) +
+  
+  # Labels
+  labs(
+    title = "KSS across experimental sessions",
+    subtitle = "Individual participant trajectories with LOESS smooth (full dataset, n=67)",
+    x = "Experimental Session",
+    y = expression(atop("Mean KSS (intervention window)",
+                        scriptstyle("(1 = Extremely alert; 9 = Very sleepy)")))
+  ) +
+  
+  # Theme
+  theme_classic(base_size = 14) +
+  theme(
+    plot.title = element_text(size = 16, face = "plain"),
+    plot.subtitle = element_text(size = 12, margin = margin(b = 10)),
+    axis.text = element_text(color = "black", size = 12),
+    axis.title = element_text(size = 13),
+    legend.position = "right",
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 11),
+    panel.grid.major.y = element_line(color = "grey90", linewidth = 0.3),
+    plot.margin = margin(15, 15, 10, 10)
+  )
+```
+
+## Distribution of KSS Scores
+
+### Observed Distribution
+```{r}
+#| label: fig-kss-distribution
+#| fig-cap: "Distribution of mean KSS scores"
+#| fig-width: 10
+#| fig-height: 6
+
+# Prepare data
+kss_dist_data <- kss_per_evening_q789 %>%
+  filter(participant_id != "P07")
+
+# Calculate statistics
+mean_kss <- mean(kss_dist_data$mean_kss, na.rm = TRUE)
+median_kss <- median(kss_dist_data$mean_kss, na.rm = TRUE)
+
+# Create density plot
+ggplot(kss_dist_data, aes(x = mean_kss)) +
+  
+  # Histogram
+  geom_histogram(aes(y = after_stat(density)), 
+                 bins = 20, fill = "#4A90E2", alpha = 0.6, 
+                 color = "black", linewidth = 0.3) +
+  
+  # Density curve
+  geom_density(color = "#E41A1C", linewidth = 1.5, adjust = 1.2) +
+  
+  # Mean line
+  geom_vline(xintercept = mean_kss, color = "black", 
+             linetype = "dashed", linewidth = 1) +
+  annotate("text", x = mean_kss + 0.3, y = 0.35, 
+           label = paste0("Mean = ", round(mean_kss, 2)),
+           color = "black", size = 4, hjust = 0) +
+  
+  # Median line
+  geom_vline(xintercept = median_kss, color = "darkgreen", 
+             linetype = "dotted", linewidth = 1) +
+  annotate("text", x = median_kss + 0.3, y = 0.32, 
+           label = paste0("Median = ", round(median_kss, 2)),
+           color = "darkgreen", size = 4, hjust = 0) +
+  
+  # Scales
+  scale_x_continuous(
+    limits = c(1, 9),
+    breaks = 1:9,
+    expand = c(0.01, 0)
+  ) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
+  
+  # Labels
+  labs(
+    title = "Distribution of Mean KSS Scores",
+    subtitle = paste0("n = ", nrow(kss_dist_data), " observations from ", 
+                     length(unique(kss_dist_data$participant_id)), " participants"),
+    x = "Mean KSS (1 = Extremely alert; 9 = Very sleepy)",
+    y = "Density"
+  ) +
+  
+  # Theme
+  theme_classic(base_size = 14) +
+  theme(
+    plot.title = element_text(size = 16, face = "plain"),
+    plot.subtitle = element_text(size = 12, margin = margin(b = 10)),
+    axis.text = element_text(color = "black", size = 12),
+    axis.title = element_text(size = 13),
+    panel.grid.major.y = element_line(color = "grey90", linewidth = 0.3),
+    plot.margin = margin(15, 15, 10, 10)
+  )
+
+# Print descriptive statistics
+cat("\nDescriptive Statistics:\n")
+cat("Mean:", round(mean_kss, 2), "\n")
+cat("Median:", round(median_kss, 2), "\n")
+cat("SD:", round(sd(kss_dist_data$mean_kss, na.rm = TRUE), 2), "\n")
+cat("Range:", round(min(kss_dist_data$mean_kss, na.rm = TRUE), 2), "-", 
+    round(max(kss_dist_data$mean_kss, na.rm = TRUE), 2), "\n")
+cat("Skewness:", round(moments::skewness(kss_dist_data$mean_kss), 2), "\n")
+cat("Kurtosis:", round(moments::kurtosis(kss_dist_data$mean_kss), 2), "\n")
+```
+
+### Model Specification Rationale
+
+**Interpretation:** The distribution of mean KSS scores shows bimodal characteristics. A Linear Mixed Model (LMM) with Gaussian distribution was selected for the following reasons:
+
+**1. Aggregation Creates Quasi-Continuous Data:**
+Although individual KSS responses are ordinal (9-point scale), averaging across three measurements (Q7-Q9) within the intervention window produces quasi-continuous values. The Central Limit Theorem ensures that such averaged scores approximate a normal distribution, even when based on ordinal data. 
+
+**2. Ordinal vs Beta Distribution:**
+A Generalized Linear Mixed Model (GLMM) with beta distribution was considered but rejected because:
+   - Beta regression requires continuous data on the (0,1) interval with equal intervals
+   - KSS is ordinal with potentially unequal intervals (e.g., distance between scores 1-2 ≠ 8-9)
+   - Transforming KSS scores to (0,1) via [(KSS-1)/8] would impose artificial continuity and equal spacing assumptions that misrepresent the scale's measurement properties
+
+**3. Robustness of Gaussian LMM:**
+Linear Mixed Models are robust to moderate deviations from normality, particularly when:
+   - Sample size is adequate (n = 67 observations from 8 participants)
+   - Interest focuses on mean differences between conditions rather than distributional shape
+   - Residual diagnostics confirm approximate normality (Shapiro-Wilk p = 0.060)
+   - The observed bimodality reflects between-participant heterogeneity (captured by random intercepts) rather than model misspecification
+
+----
+
+# Statistical Analysis
+
+## Hierarchical Model Building
+
+Models were built hierarchically, adding complexity only when justified by likelihood ratio tests (α = 0.05).
+
+----
+
+## Step 1: Baseline Model (Intercept-only)
+
+### Model Specification
+```{r}
+#| label: baseline-model
+
+m0 <- lmer(mean_kss ~ 1 + (1 | participant_id), data = kss_lmm, REML = FALSE)
+summary(m0)
+```
+
+### Fit Statistics and Variance Components
+```{r}
+#| label: baseline-statistics
+
+# Model fit
+cat("AIC:", round(AIC(m0), 2), "| BIC:", round(BIC(m0), 2), 
+    "| LogLik:", round(as.numeric(logLik(m0)), 2), "\n\n")
+
+# Variance components
+vc <- as.data.frame(VarCorr(m0))
+icc <- vc$vcov[1] / sum(vc$vcov)
+
+cat("Between-participant variance (τ²):", round(vc$vcov[1], 3), "\n")
+cat("Within-participant variance (σ²): ", round(vc$vcov[2], 3), "\n")
+cat("ICC:", round(icc, 3), "(", round(icc * 100, 1), "% between participants)\n")
+```
+
+### Participant-Specific Means
+```{r}
+#| label: baseline-plot
+#| fig-width: 8
+#| fig-height: 5
+
+ranef_m0 <- ranef(m0)$participant_id
+ranef_m0$participant_id <- rownames(ranef_m0)
+names(ranef_m0)[1] <- "random_intercept"
+grand_mean <- fixef(m0)["(Intercept)"]
+ranef_m0$predicted_mean <- grand_mean + ranef_m0$random_intercept
+ranef_m0 <- ranef_m0[order(ranef_m0$predicted_mean), ]
+ranef_m0$participant_id <- factor(ranef_m0$participant_id, levels = ranef_m0$participant_id)
+
+ggplot(ranef_m0, aes(x = participant_id, y = predicted_mean)) +
+  geom_hline(yintercept = grand_mean, linetype = "dashed", color = "red", linewidth = 1) +
+  geom_point(size = 4, color = "#4A90E2") +
+  geom_segment(aes(xend = participant_id, y = grand_mean, yend = predicted_mean),
+               color = "#4A90E2", linewidth = 1) +
+  labs(x = "Participant", y = "Predicted Mean KSS",
+       title = "Participant-Specific Mean KSS (Baseline Model)") +
+  scale_y_continuous(limits = c(1, 9), breaks = 1:9) +
+  theme_classic(base_size = 13) +
+  theme(panel.grid.major.y = element_line(color = "grey90", linewidth = 0.3))
+```
+
+### Residual Diagnostics
+```{r}
+#| label: baseline-diagnostics
+#| fig-width: 10
+#| fig-height: 5
+
+par(mfrow = c(1, 2))
+hist(resid(m0), breaks = 20, main = "Residuals", xlab = "Residuals", 
+     col = "lightblue", border = "black")
+qqnorm(resid(m0), main = "Q-Q Plot", pch = 16, col = rgb(0, 0, 0, 0.5))
+qqline(resid(m0), col = "red", lwd = 2)
+par(mfrow = c(1, 1))
+```
+
+**Interpretation:** The baseline model establishes that `r round(icc * 100, 1)`% of variance in KSS is attributable to participant differences (ICC = `r round(icc, 3)`). The next step tests whether light exposure variables improve model fit.
+
+## Step 2: Add Light Exposure Lags (Sequential Testing)
+
+### Model m1a: Add Light Lag 0 Only
+```{r}
+#| label: step2-m1a-model
+
+m1a <- lmer(
+  mean_kss ~ Light_Lag0_num + (1 | participant_id),
+  data = kss_lmm,
+  REML = FALSE
+)
+
+summary(m1a)
+```
+
+### Model m1b: Add Light Lag 1 Additionally (One Day Before)
+```{r}
+#| label: step2-m1b-model
+
+m1b <- lmer(
+  mean_kss ~ Light_Lag0_num + Light_Lag1_num + (1 | participant_id),
+  data = kss_lmm,
+  REML = FALSE
+)
+
+summary(m1b)
+```
+
+### Model m1c: Add Light Lag 2 Additionally (Two Days Before)
+```{r}
+#| label: step2-m1c-model
+
+m1c <- lmer(
+  mean_kss ~ Light_Lag0_num + Light_Lag1_num + Light_Lag2_num + 
+    (1 | participant_id),
+  data = kss_lmm,
+  REML = FALSE
+)
+
+summary(m1c)
+```
+
+### Likelihood Ratio Tests: Lag Effects
+```{r}
+#| label: step2-lrt-tests
+
+# LRT 1: Does adding Lag 0 improve fit over baseline?
+lrt_m0_vs_m1a <- anova(m0, m1a)
+print(lrt_m0_vs_m1a)
+
+# LRT 2: Does adding Lag 1 improve fit over Lag 0 only?
+lrt_m1a_vs_m1b <- anova(m1a, m1b)
+print(lrt_m1a_vs_m1b)
+
+# LRT 3: Does adding Lag 2 improve fit over Lag 0 + Lag 1?
+lrt_m1b_vs_m1c <- anova(m1b, m1c)
+print(lrt_m1b_vs_m1c)
+```
+
+### Model Comparison Table
+```{r}
+#| label: step2-comparison-table
+
+data.frame(
+  Model = c("m0 (Baseline)", 
+            "m1a (+ Lag 0)", 
+            "m1b (+ Lag 0+1)", 
+            "m1c (+ Lag 0+1+2)"),
+  npar = c(attr(logLik(m0), "df"), 
+           attr(logLik(m1a), "df"),
+           attr(logLik(m1b), "df"),
+           attr(logLik(m1c), "df")),
+  AIC = c(AIC(m0), AIC(m1a), AIC(m1b), AIC(m1c)),
+  BIC = c(BIC(m0), BIC(m1a), BIC(m1b), BIC(m1c)),
+  LogLik = c(as.numeric(logLik(m0)), 
+             as.numeric(logLik(m1a)),
+             as.numeric(logLik(m1b)),
+             as.numeric(logLik(m1c)))
+) %>%
+  kable(digits = 2, caption = "Sequential Model Comparison: Testing Light Lag Effects") %>%
+  kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover"))
+```
+
+### Interpretation
+
+Based on the LRT results:
+
+- **LRT 1 (m0 vs m1a):** Adding Lag 0 significantly improved fit over baseline (χ²(1) = 11.23, p < 0.001, ΔAIC = -9.2) 
+- **LRT 2 (m1a vs m1b):** Adding Lag 1 did not improve fit over Lag 0 only (χ²(1) = 0.32, p = 0.572, ΔAIC = +1.7) 
+- **LRT 3 (m1b vs m1c):** Adding Lag 2 did not improve fit over Lag 0 + Lag 1 (χ²(1) = 0.60, p = 0.438, ΔAIC = +1.4) 
+
+**Decision:** Proceed with **m1a** (Light_Lag0_num only). Only current evening light exposure significantly predicts subjective sleepiness; prior nights show no statistically significant carryover effects.
+
+----
+
+## Step 3: Test Session Effects
+
+### Linear Session Term
+```{r}
+#| label: step3-linear
+
+m2 <- lmer(
+  mean_kss ~ Light_Lag0_num + 
+    exp_session + (1 | participant_id),
+  data = kss_lmm,
+  REML = FALSE
+)
+
+summary(m2)
+```
+
+### Quadratic Session Term
+```{r}
+#| label: step3-quadratic
+
+m3 <- lmer(
+  mean_kss ~ Light_Lag0_num + 
+    exp_session + I(exp_session^2) + (1 | participant_id),
+  data = kss_lmm,
+  REML = FALSE
+)
+
+summary(m3)
+```
+
+### Likelihood Ratio Tests: Session Effects
+```{r}
+#| label: step3-lrt
+
+# LRT 1: Does adding exp_session (linear) improve fit over Lag 0 only?
+lrt_m1a_vs_m2 <- anova(m1a, m2)
+print(lrt_m1a_vs_m2)
+
+# LRT 2: Does adding quadratic term improve fit over linear only?
+lrt_m2_vs_m3 <- anova(m2, m3)
+print(lrt_m2_vs_m3)
+```
+
+### Interpretation
+
+Based on the LRT results, model fit was not significantly improved by adding linear exp_session (χ²(1) = 0.23, p = 0.634, ΔAIC = +1.8), nor by adding the quadratic term (χ²(1) = 0.05, p = 0.823, ΔAIC = +1.9). Therefore, model **m1a** (Lag 0 only) was retained as the final model, indicating that subjective sleepiness shows no systematic temporal trend in this experiment (habituation or sensitization) across experimental sessions.
+
+**Final Primary Model:** m1a (Light_Lag0_num + random intercept)
+
+----
+
+## Primary Model: Diagnostics
+
+Assumption checks for the selected primary model (m1a).
+
+### Check 1: Multicollinearity (VIF)
+```{r}
+#| label: primary-vif
+#| fig-width: 8
+#| fig-height: 6
+
+# Count number of fixed effects (excluding intercept)
+n_predictors <- length(fixef(m1a)) - 1  # -1 for intercept
+
+if (n_predictors >= 2) {
+  vif_m1a <- vif(m1a)
+  
+  # Create barplot
+  barplot(vif_m1a, 
+          main = "Variance Inflation Factors (Primary Model)",
+          ylab = "VIF",
+          col = ifelse(vif_m1 > 5, "red", 
+                      ifelse(vif_m1 > 2, "orange", "lightblue")),
+          las = 2,
+          ylim = c(0, max(vif_m1) * 1.2))
+  abline(h = 5, col = "red", lty = 2, lwd = 2)
+  abline(h = 10, col = "darkred", lty = 2, lwd = 2)
+  legend("topright", 
+         legend = c("VIF < 2 (excellent)", "VIF 2-5 (acceptable)", "VIF > 5 (concern)"),
+         fill = c("lightblue", "orange", "red"),
+         cex = 0.8)
+  
+  print(round(vif_m1a, 2))
+  
+  if (all(vif_m1 < 5)) {
+    cat("\n✓ All VIF < 5: No multicollinearity issues.\n")
+  } else {
+    cat("\n⚠ Warning: Some VIF ≥ 5, indicating potential multicollinearity.\n")
+  }
+} else {
+  cat("Final model (m1) contains only 1 predictor (Light_Lag0_num).\n")
+  cat("VIF not applicable - multicollinearity assessment requires at least 2 predictors.\n")
+  cat("\n No multicollinearity possible with single predictor.\n")
+}
+```
+
+### Check 2: Residual Plots
+```{r}
+#| label: primary-residuals
+#| fig-width: 10
+#| fig-height: 8
+
+par(mfrow = c(2, 2))
+
+# Panel 1: Residuals vs Fitted
+plot(fitted(m1a), resid(m1a), xlab = "Fitted", ylab = "Residuals",
+     main = "Residuals vs Fitted", pch = 16, col = rgb(0, 0, 0, 0.5))
+abline(h = 0, col = "red", lty = 2, lwd = 2)
+lines(lowess(fitted(m1a), resid(m1a)), col = "blue", lwd = 2)
+
+# Panel 2: Q-Q Plot
+qqnorm(resid(m1a), main = "Q-Q Plot", pch = 16, col = rgb(0, 0, 0, 0.5))
+qqline(resid(m1a), col = "red", lwd = 2)
+
+# Panel 3: Scale-Location
+plot(fitted(m1a), sqrt(abs(resid(m1a))), xlab = "Fitted", ylab = "√|Residuals|",
+     main = "Scale-Location", pch = 16, col = rgb(0, 0, 0, 0.5))
+lines(lowess(fitted(m1a), sqrt(abs(resid(m1a)))), col = "blue", lwd = 2)
+
+# Panel 4: Residuals vs Observation Order
+plot(1:length(resid(m1a)), resid(m1a), 
+     xlab = "Observation Order", ylab = "Residuals",
+     main = "Residuals vs Order", pch = 16, col = rgb(0, 0, 0, 0.5))
+abline(h = 0, col = "red", lty = 2, lwd = 2)
+lines(lowess(1:length(resid(m1a)), resid(m1a)), col = "blue", lwd = 2)
+```
+
+### Check 3: Normality (Shapiro-Wilk)
+```{r}
+#| label: primary-shapiro
+
+shapiro.test(resid(m1a))
+```
+
+**Interpretation:** Residuals were approximately normally distributed (Shapiro-Wilk: W = 0.968, p = 0.081), indicating no substantial violations of normality assumptions.
+
+### Check 4: Homogeneity of Variance (Levene's Test)
+```{r}
+#| label: primary-levene
+
+# Group fitted values into low/high for variance comparison
+fitted_groups <- cut(fitted(m1a), 
+                     breaks = quantile(fitted(m1a), probs = c(0, 0.5, 1)),
+                     include.lowest = TRUE)
+
+# Levene's test for homoscedasticity
+levene_result <- leveneTest(resid(m1a) ~ fitted_groups)
+
+levene_result
+```
+
+**Interpretation:** Levene's test indicated homogeneity of variance (F(1,65) = 0.95, p = 0.333). While the Scale-Location plot showed a minor U-pattern, residual variance did not significantly differ across fitted value groups.
+
+### Check 5: Random Effects Normality
+```{r}
+#| label: primary-random-effects
+#| fig-width: 10
+#| fig-height: 5
+
+ranef_m1a <- ranef(m1a)$participant_id
+
+par(mfrow = c(1, 2))
+
+hist(ranef_m1a$`(Intercept)`, main = "Random Intercepts",
+     xlab = "Random Intercept", col = "lightblue", border = "black", breaks = 8)
+
+qqnorm(ranef_m1a$`(Intercept)`, main = "Q-Q Plot: Random Intercepts",
+       pch = 16, col = rgb(0, 0, 0, 0.6))
+qqline(ranef_m1a$`(Intercept)`, col = "red", lwd = 2)
+
+par(mfrow = c(1, 1))
+
+shapiro.test(ranef_m1a$`(Intercept)`)
+```
+
+### Check 6: Influential Observations
+```{r}
+#| label: primary-influential
+
+# Calculate Cook's Distance
+infl_m1a <- influence(m1a, obs = TRUE)
+cooks_d_m1a <- cooks.distance(infl_m1a)
+
+# Conservative threshold (same as Melatonin analysis)
+threshold_m1a <- 4/nrow(kss_lmm)
+
+# Identify influential observations
+influential_idx <- which(cooks_d_m1a > threshold_m1a)
+
+cat("Number of influential observations:", length(influential_idx), 
+    "(", round(100*length(influential_idx)/nrow(kss_lmm), 0), "% of data)\n")
+```
+```{r}
+# Show influential observations
+if (length(influential_idx) > 0) {
+  kss_lmm[influential_idx, c("participant_id", "exp_session", "mean_kss")]
+}
+```
+
+#### Cook's Distance Plot
+```{r}
+#| label: primary-cooks-plot
+#| fig-width: 8
+#| fig-height: 5
+
+plot(cooks_d_m1a, type = "h", 
+     main = "Cook's Distance - KSS Model m1a",
+     ylab = "Cook's D", lwd = 2,
+     col = ifelse(cooks_d_m1a > threshold_m1a, "red", "black"))
+abline(h = threshold_m1a, lty = 2, col = "red")
+abline(h = 1.0, lty = 2, col = "darkred", lwd = 2)  
+text(x = length(cooks_d_m1a) * 0.8, y = threshold_m1a + 0.02, 
+     labels = paste0("4/n = ", round(threshold_m1a, 3)), 
+     col = "red", cex = 0.9)
+text(x = length(cooks_d_m1a) * 0.8, y = 1.05, 
+     labels = "Critical threshold = 1.0", 
+     col = "darkred", cex = 0.9)
+```
+
+
+### Check 7: Temporal Autocorrelation
+
+Given the repeated measurements structure (10-13 consecutive evenings per participant), residuals were tested for temporal autocorrelation.
+```{r}
+#| label: primary-autocorrelation
+#| fig-width: 10
+#| fig-height: 5
+
+par(mfrow = c(1, 2))
+
+# Autocorrelation function
+acf(resid(m1a), main = "ACF: Residuals", lag.max = 13)
+
+# Partial autocorrelation function  
+pacf(resid(m1a), main = "PACF: Residuals", lag.max = 13)
+```
+
+### Check 7*: Ljung-Box Test
+```{r}
+#| label: primary-ljung-box
+
+# Ljung-Box test for overall autocorrelation
+ljung_box_result <- Box.test(resid(m1a), lag = 10, type = "Ljung-Box")
+
+print(ljung_box_result)
+```
+
+**Interpretation:**: The ACF and PACF plots showed one minor deviation at lag 6, but the Ljung-Box test (lag = 10) indicated no significant overall autocorrelation (p > 0.05), suggesting that the independence assumption for the residuals is adequately met.
+
+### Check 8: DHARMa Residual Diagnostics
+```{r}
+sim_m1a <- simulateResiduals(m1a, n = 1000)
+plot(sim_m1a)
+
+# Individual tests
+testUniformity(sim_m1a)
+testDispersion(sim_m1a)
+testOutliers(sim_m1a)
+testQuantiles(sim_m1a)
+```
+
+----
+
+### Diagnostic Interpretation
+```{r}
+#| label: diagnostic-interpretation
+
+# Shapiro-Wilk residuals
+shapiro_resid <- shapiro.test(resid(m1a))
+
+# Levene test
+fitted_groups <- cut(fitted(m1a), 
+                     breaks = quantile(fitted(m1a), probs = c(0, 0.5, 1)), 
+                     include.lowest = TRUE)
+levene_result <- leveneTest(resid(m1a) ~ fitted_groups)
+
+# Random effects normality
+ranef_m1a <- ranef(m1a)$participant_id
+shapiro_re <- shapiro.test(ranef_m1a$`(Intercept)`)
+
+# Influential observations
+infl_m1a <- influence(m1a, obs = TRUE)
+influential_idx <- which(cooks.distance(infl_m1a) > 4/nrow(kss_lmm))
+```
+
+**Diagnostics Summary:**
+
+1. **Multicollinearity:** VIF = 1.0 (no collinearity)
+2. **Normality (residuals):** W = `r round(shapiro_resid$statistic, 3)`, p = `r round(shapiro_resid$p.value, 3)` 
+3. **Homoscedasticity:** F = `r round(levene_result$'F value'[1], 3)`, p = `r round(levene_result$'Pr(>F)'[1], 3)`
+4. **Random effects:** W = `r round(shapiro_re$statistic, 3)`, p = `r round(shapiro_re$p.value, 3)` 
+5. **Influential obs:** `r length(influential_idx)` (`r round(100*length(influential_idx)/nrow(kss_lmm), 1)`%) 
+6. **Temporal autocorrelation:** No sigificant overall autocorrelation detected 
+
+----
+
+## Address Visual Heteroscedasticity: Weighted Model
+```{r}
+#| label: weighted-model
+
+m1a_weighted <- lme(
+  mean_kss ~ Light_Lag0_num,
+  random = ~ 1 | participant_id,
+  weights = varPower(form = ~ fitted(.)),
+  data = kss_lmm,
+  method = "ML"
+)
+
+summary(m1a_weighted)
+```
+
+### Weighted Diagnostics
+```{r}
+#| label: weighted-diagnostics
+#| fig-width: 10
+#| fig-height: 5
+
+par(mfrow = c(1, 2))
+
+resid_w <- resid(m1a_weighted, type = "pearson")
+fitted_w <- fitted(m1a_weighted)
+
+plot(fitted_w, resid_w, xlab = "Fitted", ylab = "Pearson Residuals",
+     main = "Weighted: Residuals vs Fitted", pch = 16, col = rgb(0,0,0,0.5))
+abline(h = 0, col = "red", lty = 2, lwd = 2)
+lines(lowess(fitted_w, resid_w), col = "blue", lwd = 2)
+
+plot(fitted_w, sqrt(abs(resid_w)), xlab = "Fitted", ylab = "√|Pearson Residuals|",
+     main = "Weighted: Scale-Location", pch = 16, col = rgb(0,0,0,0.5))
+lines(lowess(fitted_w, sqrt(abs(resid_w))), col = "blue", lwd = 2)
+
+# Tests
+shapiro.test(resid_w)
+
+fitted_groups_w <- cut(fitted_w, breaks = quantile(fitted_w, probs = c(0, 0.5, 1)), include.lowest = TRUE)
+leveneTest(resid_w ~ fitted_groups_w)
+```
+### Comparison: Unweighted vs Weighted
+```{r}
+#| label: weighted-comparison
+
+coefs_uw <- summary(m1a)$coefficients
+coefs_w <- summary(m1a_weighted)$tTable
+
+# Extract only the fixed effects that exist in the model (excluding intercept)
+fixed_names <- rownames(coefs_uw)[rownames(coefs_uw) != "(Intercept)"]
+
+data.frame(
+  Effect = fixed_names,
+  Beta_UW = coefs_uw[fixed_names, "Estimate"],
+  SE_UW = coefs_uw[fixed_names, "Std. Error"],
+  p_UW = coefs_uw[fixed_names, "Pr(>|t|)"],
+  Beta_W = coefs_w[fixed_names, "Value"],
+  SE_W = coefs_w[fixed_names, "Std.Error"],
+  p_W = coefs_w[fixed_names, "p-value"]
+) %>%
+  kable(digits = 3, caption = "Unweighted vs Weighted Comparison") %>%
+  kable_styling(full_width = FALSE)
+
+cat("\nAIC: Unweighted =", round(AIC(m1a), 2), "| Weighted =", round(AIC(m1a_weighted), 2))
+```
+
+Although the weighted model showed marginally better fit (ΔAIC = -1.41) and 
+improved diagnostic test results (Levene p: 0.351 → 0.582), the substantive 
+conclusions remain unchanged:
+
+- **Primary effect (Lag0)** is robust: β = -0.752 vs -0.683 (Δ = 0.069)
+- **Both models**: Lag0 highly significant (p < 0.001), Lag1/Lag2 non-significant
+- Statistical tests indicated homoscedasticity in unweighted model (Levene p = 0.351)
+
+**Decision**: Unweighted model retained as primary for simplicity. 
+Results are robust to weighting specification.
+
+### Sensitivity Analysis: Model m1a Without Influential Observations 
+```{r}
+#| label: sensitivity-robust-model
+
+# Identify influential observations
+infl_m1a <- influence(m1a, obs = TRUE)
+cooks_d_m1a <- cooks.distance(infl_m1a)
+threshold_m1a <- 4 / nrow(kss_lmm)
+influential_idx <- which(cooks_d_m1a > threshold_m1a)
+
+# Show influential observations
+kss_lmm[influential_idx, c("participant_id", "exp_session", "mean_kss")]
+
+# Create robust dataset
+kss_lmm_robust <- kss_lmm[-influential_idx, ]
+
+# Fit robust model
+m1a_robust <- lmer(
+  mean_kss ~ Light_Lag0_num + (1 | participant_id),
+  data = kss_lmm_robust,
+  REML = FALSE
+)
+
+summary(m1a_robust)
+```
+
+Altough AIC has been massively improved, significance and direction of the main effect (Lag 0) was maintained. As both influential observations represent biologically plausible values, model m1a is retained as the primary model, keeping in mind, that those two influential observations might increase the strength of the bright light exposure on sleepiness reduction, however they are not the only observations driving this effect. The robust model will be reported in a summary table for transparency. 
+
+## Primary Model m1a: Results
+
+### Fixed Effects with Benjamini-Hochberg Correction for Multiple Testing
+```{r}
+#| label: primary-results-bh
+
+# Extract fixed effects (exclude intercept)
+coefs_m1a <- summary(m1a)$coefficients
+fixed_names <- rownames(coefs_m1a)[rownames(coefs_m1a) != "(Intercept)"]
+
+# Apply BH correction
+p_raw <- coefs_m1a[fixed_names, "Pr(>|t|)"]
+p_BH <- p.adjust(p_raw, method = "BH")
+
+# Results table
+data.frame(
+  Effect = fixed_names,
+  Estimate = coefs_m1a[fixed_names, "Estimate"],
+  SE = coefs_m1a[fixed_names, "Std. Error"],
+  df = round(coefs_m1a[fixed_names, "df"], 1),
+  t = coefs_m1a[fixed_names, "t value"],
+  p_raw = p_raw,
+  p_BH = p_BH
+) %>%
+  kable(digits = 3, row.names = FALSE,
+        caption = "Primary Model Fixed Effects (Benjamini-Hochberg corrected)") %>%
+  kable_styling(full_width = FALSE)
+```
+
+**Interpretation:** Current evening light exposure (Lag0) significantly reduced subjective sleepiness (β = -0.752, SE = 0.212, p < 0.001 after BH correction), with bright light evenings associated with lower KSS scores. No statistically significant carryover effects from previous evenings were detected (Lag1: p = 0.551; Lag2: p = 0.551 after BH correction).
+
+### Variance Components
+```{r}
+#| label: primary-variance
+
+vc <- as.data.frame(VarCorr(m1a))
+icc <- vc$vcov[1] / sum(vc$vcov)
+
+data.frame(
+  Component = c("Between-participant (τ²)", "Within-participant (σ²)", "Total", "ICC"),
+  Value = c(vc$vcov[1], vc$vcov[2], sum(vc$vcov), icc)
+) %>%
+  kable(digits = 3, row.names = FALSE,
+        caption = "Variance Components") %>%
+  kable_styling(full_width = FALSE)
+```
+
+**Interpretation:** Between-participant variance accounted for `r paste0(round(icc*100, 1), "%")` of total variance in KSS, indicating substantial differences in individual sleepiness levels.
+
+## Exploratory Analyses
+
+### Exploratory Analysis 1: Random Slopes for Light_Lag0
+
+Test whether individual variation in the acute light effect improves model fit.
+```{r}
+#| label: sens-random-slope
+
+# Attempt random slope model
+m1a_random_slope <- lmer(
+  mean_kss ~ Light_Lag0_num + 
+    (1 + Light_Lag0_num | participant_id),
+  data = kss_lmm,
+  REML = FALSE,
+  control = lmerControl(optimizer = "bobyqa")
+)
+
+summary(m1a_random_slope)
+
+# Model comparison
+anova(m1a, m1a_random_slope)
+```
+
+**Interpretation:** The random slope model for Light_Lag0 did not significantly improve fit (χ²(2) = 3.97, p = 0.15), despite converging successfully using the bobyqa optimizer. The random slope model showed similar parsimony and increased standard errors for the primary effect (SE: 0.212 → 0.311), reducing statistical power. With only 8 participants, there is insufficient data to reliably estimate individual variation in light sensitivity. 
+
+**Technical note:** The estimated random slope variance (0.48) suggests some individual differences in light sensitivity may exist, but this cannot be reliably quantified with the current sample size.
+
+----
+
+### Exploratory Analysis 2: Demographic Moderation
+
+Important Caveat: This analysis is exploratory due to sample size limitations (n = 8 participants: 3 males, 5 females). Between-subject effects cannot be reliably estimated with small groups. Results should be interpreted with  caution.
+```{r}
+#| label: exploratory-moderation
+
+# Center age
+kss_lmm <- kss_lmm %>%
+  mutate(age_c = age - mean(age, na.rm = TRUE))
+
+# Moderation model
+m1a_moderation <- lmer(
+  mean_kss ~ Light_Lag0_num +
+    sex + age_c + Light_Lag0_num:sex + Light_Lag0_num:age_c +
+    (1 | participant_id),
+  data = kss_lmm,
+  REML = FALSE
+)
+
+summary(m1a_moderation)
+```
+
+**Interpretation:**
+
+- **Sex × Light interaction:** Female participants showed a stronger acute light effect on KSS ratings (β = −1.12, p < 0.001). For male participants, the corresponding effect was substantially weaker (β = −1.12 + 0.98 = −0.14). The interaction term was statistically significant (β = 0.98, p = 0.041). However, this moderation effect must be interpreted with extreme caution given the very small subgroup sizes (5 females vs. 3 males).
+
+- **Age main effect:** Higher age was associated with lower sleepiness (β = −0.24 per year of age, p = 0.040). There was no evidence that age moderated the acute light effect (β = −0.02, p = 0.798).
+
+**Conclusion:** Although the model indicates potential moderation by sex and a main effect of age, the between-subject sample size (n = 8) is far too small to draw robust conclusions. 
+
+### Exploratory Analysis 3: Light Lag Interactions
+
+Test whether light exposure lags interact with each other.
+```{r}
+#| label: sens-light-interactions
+
+m1a_interactions <- lmer(
+  mean_kss ~ Light_Lag0_num * Light_Lag1_num + 
+    Light_Lag0_num * Light_Lag2_num +
+    Light_Lag1_num * Light_Lag2_num +
+    (1 | participant_id),
+  data = kss_lmm,
+  REML = FALSE
+)
+
+summary(m1a_interactions)
+```
+
+**Interpretation:** No significant interactions between light exposure lags were detected (all p > 0.05). Marginal patterns for Lag2 (p = 0.052) and Lag0 × Lag2 (p = 0.068) are present, suggesting potential patterns for the seconday day before current day´s light exposure. However such patterns need to be explored using a larger sample size to draw more solid conclusions. Model fit worsened (ΔAIC = +5.1).
+
+
+### Exploratory Analysis 4: Persistence Models 
+
+#### Rationale for Persistence Analysis
+
+The primary LMM analysis demonstrated that evening light exposure (Lag 0) significantly reduces subjective sleepiness, while prior exposures (Lag 1, Lag 2) showed no statistically significant carryover effects. However, this lag-based approach tests whether *individual prior nights* contribute additively to the current night's sleepiness levels.
+
+The **persistence analysis** addresses the question: Does the *number of consecutive days* of the same light condition (run length) modulate subjective sleepiness? 
+
+**Key distinction from lag analysis:**
+
+- Lag analysis: Tests whether Day[t-1], Day[t-2], Day[t-3] each add independent effects
+- Persistence analysis: Tests whether being on the 1st vs. 2nd vs. 3rd+ consecutive day of the *same condition* matters
+
+This exploratory analysis uses separate models for dim and bright conditions, testing both linear (numeric run length) and non-linear (categorical run length) accumulation patterns.
+
+#### Dataset Preparation 
+
+```{r}
+#| label: create-persistence-dataset
+
+# Define participant list and light patterns
+participant_list <- c("P01", "P02", "P03", "P04", "P05", "P06", "P09", "P10")
+
+# Create persistence dataset starting from session 1
+kss_persistence <- map_dfr(participant_list, ~{
+  df <- kss_per_evening_q789 %>%
+    filter(participant_id == .x) %>%
+    select(participant_id, exp_session, mean_kss)
+  
+  light_df <- tibble(
+    exp_session = seq_along(light_patterns[[.x]]),
+    Light_Lag0 = light_patterns[[.x]]
+  )
+  
+  df %>% left_join(light_df, by = "exp_session")
+})
+
+# Add demographics
+participant_demographics <- tibble(
+  participant_id = c("P01", "P02", "P03", "P04", "P05", "P06", "P09", "P10"),
+  sex = c("female", "male", "female", "female", "male", "female", "female", "male"),
+  age = c(24, 21, 24, 23, 31, 23, 28, 32)
+)
+
+kss_persistence <- kss_persistence %>%
+  left_join(participant_demographics, by = "participant_id")
+
+# Calculate run-length variables (numeric)
+kss_persistence <- kss_persistence %>%
+  filter(!is.na(Light_Lag0)) %>%  # Remove rows without light condition
+  filter(!(participant_id == "P10" & exp_session == 5)) %>%  # Exclude P10 session 5
+  arrange(participant_id, exp_session) %>%
+  group_by(participant_id) %>%
+  mutate(
+    # Track when condition changes
+    condition_change = Light_Lag0 != lag(Light_Lag0, default = "CHANGE"),
+    
+    # Calculate run ID (new sequence after each change)
+    run_id = cumsum(condition_change),
+    
+    # Calculate run length within each run
+    run_length = ave(run_id, run_id, FUN = seq_along),
+    
+    # Separate run lengths for Dim and Bright
+    run_length_dim = ifelse(Light_Lag0 == "D", run_length, NA),
+    run_length_bright = ifelse(Light_Lag0 == "B", run_length, NA),
+    
+    # Also create numeric Light variable for consistency
+    Light_Lag0_num = ifelse(Light_Lag0 == "D", 0, 1)
+  ) %>%
+  ungroup() %>%
+  select(participant_id, exp_session, mean_kss, Light_Lag0, Light_Lag0_num,
+         run_length, run_length_dim, run_length_bright, sex, age)
+
+# Create categorical run-length variables
+kss_persistence <- kss_persistence %>%
+  mutate(
+    run_category_dim = case_when(
+      run_length_dim == 1 ~ "First",
+      run_length_dim == 2 ~ "Second",
+      run_length_dim >= 3 ~ "Third",
+      TRUE ~ NA_character_
+    ),
+    run_category_bright = case_when(
+      run_length_bright == 1 ~ "First",
+      run_length_bright == 2 ~ "Second",
+      run_length_bright >= 3 ~ "Third",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  mutate(
+    run_category_dim = factor(run_category_dim, levels = c("First", "Second", "Third")),
+    run_category_bright = factor(run_category_bright, levels = c("First", "Second", "Third"))
+  )
+```
+
+#### Persistence Dataset
+```{r}
+#| label: kss-persistence-dataset-table
+
+DT::datatable(
+  kss_persistence,
+  options = list(
+    pageLength = 20,
+    scrollX = TRUE,
+    order = list(list(0, 'asc'), list(1, 'asc'))
+  ),
+  caption = "KSS Persistence dataset with run-length encoding (n=67, P10 session 5 excluded)",
+  rownames = FALSE
+) %>%
+  DT::formatRound(columns = 'mean_kss', digits = 2) %>%
+  DT::formatStyle(
+    'Light_Lag0',
+    backgroundColor = DT::styleEqual(c('D', 'B'), c('#e3f2fd', '#fff3e0'))
+  )
+```
+
+#### Descriptive Visualizations
+```{r}
+#| label: kss-persistence-descriptive-visualizations
+
+# Define color scheme
+color_dim <- "#4A90E2"    # Blue for Dim
+color_bright <- "#F5A623" # Orange for Bright
+
+# Prepare data WITH Session 1
+plot_data_dim_s1 <- kss_persistence %>%
+  filter(!is.na(run_length_dim)) %>%
+  mutate(run_length_dim = factor(run_length_dim))
+
+plot_data_bright_s1 <- kss_persistence %>%
+  filter(!is.na(run_length_bright)) %>%
+  mutate(run_length_bright = factor(run_length_bright))
+
+# Prepare data WITHOUT Session 1
+plot_data_dim_no_s1 <- kss_persistence %>%
+  filter(!is.na(run_length_dim), exp_session > 1) %>%
+  mutate(run_length_dim = factor(run_length_dim))
+
+plot_data_bright_no_s1 <- kss_persistence %>%
+  filter(!is.na(run_length_bright), exp_session > 1) %>%
+  mutate(run_length_bright = factor(run_length_bright))
+
+# Create all 4 plots
+p_dim_s1 <- ggplot(plot_data_dim_s1, aes(x = run_length_dim, y = mean_kss)) +
+  geom_boxplot(fill = color_dim, outlier.shape = NA, width = 0.6, linewidth = 0.5) +
+  geom_point(position = position_jitter(width = 0.15), size = 2.5, alpha = 0.7, shape = 16) +
+  labs(title = "Dim Nights (with Session 1)", subtitle = paste0("n = ", nrow(plot_data_dim_s1)),
+       x = "Consecutive Nights", y = "Mean KSS") +
+  theme_classic(base_size = 14) +
+  theme(aspect.ratio = 1, plot.title = element_text(size = 16, hjust = 0),
+        plot.subtitle = element_text(size = 13, hjust = 0, margin = margin(b = 10)),
+        axis.text = element_text(color = "black", size = 13),
+        axis.title = element_text(size = 14),
+        panel.grid.major.y = element_line(color = "grey90", linewidth = 0.3),
+        legend.position = "none")
+
+p_bright_s1 <- ggplot(plot_data_bright_s1, aes(x = run_length_bright, y = mean_kss)) +
+  geom_boxplot(fill = color_bright, outlier.shape = NA, width = 0.6, linewidth = 0.5) +
+  geom_point(position = position_jitter(width = 0.15), size = 2.5, alpha = 0.7, shape = 16) +
+  labs(title = "Bright Nights (with Session 1)", subtitle = paste0("n = ", nrow(plot_data_bright_s1)),
+       x = "Consecutive Nights", y = "Mean KSS") +
+  theme_classic(base_size = 14) +
+  theme(aspect.ratio = 1, plot.title = element_text(size = 16, hjust = 0),
+        plot.subtitle = element_text(size = 13, hjust = 0, margin = margin(b = 10)),
+        axis.text = element_text(color = "black", size = 13),
+        axis.title = element_text(size = 14),
+        panel.grid.major.y = element_line(color = "grey90", linewidth = 0.3),
+        legend.position = "none")
+
+p_dim_no_s1 <- ggplot(plot_data_dim_no_s1, aes(x = run_length_dim, y = mean_kss)) +
+  geom_boxplot(fill = color_dim, outlier.shape = NA, width = 0.6, linewidth = 0.5) +
+  geom_point(position = position_jitter(width = 0.15), size = 2.5, alpha = 0.7, shape = 16) +
+  labs(title = "Dim Nights (without Session 1)", subtitle = paste0("n = ", nrow(plot_data_dim_no_s1)),
+       x = "Consecutive Nights", y = "Mean KSS") +
+  theme_classic(base_size = 14) +
+  theme(aspect.ratio = 1, plot.title = element_text(size = 16, hjust = 0),
+        plot.subtitle = element_text(size = 13, hjust = 0, margin = margin(b = 10)),
+        axis.text = element_text(color = "black", size = 13),
+        axis.title = element_text(size = 14),
+        panel.grid.major.y = element_line(color = "grey90", linewidth = 0.3),
+        legend.position = "none")
+
+p_bright_no_s1 <- ggplot(plot_data_bright_no_s1, aes(x = run_length_bright, y = mean_kss)) +
+  geom_boxplot(fill = color_bright, outlier.shape = NA, width = 0.6, linewidth = 0.5) +
+  geom_point(position = position_jitter(width = 0.15), size = 2.5, alpha = 0.7, shape = 16) +
+  labs(title = "Bright Nights (without Session 1)", subtitle = paste0("n = ", nrow(plot_data_bright_no_s1)),
+       x = "Consecutive Nights", y = "Mean KSS") +
+  theme_classic(base_size = 14) +
+  theme(aspect.ratio = 1, plot.title = element_text(size = 16, hjust = 0),
+        plot.subtitle = element_text(size = 13, hjust = 0, margin = margin(b = 10)),
+        axis.text = element_text(color = "black", size = 13),
+        axis.title = element_text(size = 14),
+        panel.grid.major.y = element_line(color = "grey90", linewidth = 0.3),
+        legend.position = "none")
+
+# Combine all plots in 2x2 grid
+(p_dim_s1 + p_bright_s1) / (p_dim_no_s1 + p_bright_no_s1)
+```
+
+#### Model 1: Linear Persistence, Models, Dim Evenings 
+```{r}
+#| label: kss-persistence-linear-dim
+
+# WITH Session 1
+kss_persistence_dim <- kss_persistence %>%
+  filter(!is.na(run_length_dim))
+
+model_persistence_dim_numeric <- lmer(
+  mean_kss ~ run_length_dim + (1 | participant_id),
+  data = kss_persistence_dim,
+  REML = FALSE
+)
+
+summary(model_persistence_dim_numeric)
+```
+
+```{r}
+# WITHOUT Session 1
+kss_persistence_dim_no_s1 <- kss_persistence %>%
+  filter(!is.na(run_length_dim), exp_session > 1)
+
+model_persistence_dim_no_s1 <- lmer(
+  mean_kss ~ run_length_dim + (1 | participant_id),
+  data = kss_persistence_dim_no_s1,
+  REML = FALSE
+)
+
+summary(model_persistence_dim_no_s1)
+```
+
+#### Model 1: Linear Persistence Models, Bright Evenings 
+
+```{r}
+#| label: kss-persistence-linear-bright
+
+# WITH Session 1
+kss_persistence_bright <- kss_persistence %>%
+  filter(!is.na(run_length_bright))
+
+model_persistence_bright_numeric <- lmer(
+  mean_kss ~ run_length_bright + (1 | participant_id),
+  data = kss_persistence_bright,
+  REML = FALSE
+)
+
+summary(model_persistence_bright_numeric)
+```
+
+```{r}
+# WITHOUT Session 1
+kss_persistence_bright_no_s1 <- kss_persistence %>%
+  filter(!is.na(run_length_bright), exp_session > 1)
+
+model_persistence_bright_no_s1 <- lmer(
+  mean_kss ~ run_length_bright + (1 | participant_id),
+  data = kss_persistence_bright_no_s1,
+  REML = FALSE
+)
+
+summary(model_persistence_bright_no_s1)
+```
+
+#### Model 2: Categorical Persistence Models, Dim Evenings 
+```{r}
+#| label: kss-persistence-categorical-dim
+
+# WITH Session 1
+kss_persistence_dim <- kss_persistence %>%
+  filter(!is.na(run_category_dim))
+
+model_persistence_dim_categorical <- lmer(
+  mean_kss ~ run_category_dim + (1 | participant_id),
+  data = kss_persistence_dim,
+  REML = FALSE
+)
+
+summary(model_persistence_dim_categorical)
+
+lrt_dim_s1 <- anova(model_persistence_dim_numeric, model_persistence_dim_categorical)
+print(lrt_dim_s1)
+```
+
+```{r}
+lrt_dim_s1 <- anova(model_persistence_dim_numeric, model_persistence_dim_categorical)
+print(lrt_dim_s1)
+```
+
+```{r}
+# WITHOUT Session 1
+kss_persistence_dim_no_s1 <- kss_persistence %>%
+  filter(!is.na(run_category_dim), exp_session > 1)
+
+model_persistence_dim_categorical_no_s1 <- lmer(
+  mean_kss ~ run_category_dim + (1 | participant_id),
+  data = kss_persistence_dim_no_s1,
+  REML = FALSE
+)
+
+summary(model_persistence_dim_categorical_no_s1)
+```
+
+```{r}
+lrt_dim_no_s1 <- anova(model_persistence_dim_no_s1, model_persistence_dim_categorical_no_s1)
+print(lrt_dim_no_s1)
+```
+
+#### Model 2: Categorical Persistence Models, Bright Evenings 
+```{r}
+#| label: kss-persistence-categorical-bright-complete
+
+# WITH Session 1
+kss_persistence_bright <- kss_persistence %>%
+  filter(!is.na(run_category_bright))
+
+model_persistence_bright_categorical <- lmer(
+  mean_kss ~ run_category_bright + (1 | participant_id),
+  data = kss_persistence_bright,
+  REML = FALSE
+)
+
+summary(model_persistence_bright_categorical)
+```
+
+```{r}
+lrt_bright_s1 <- anova(model_persistence_bright_numeric, model_persistence_bright_categorical)
+print(lrt_bright_s1)
+```
+
+```{r}
+# WITHOUT Session 1
+kss_persistence_bright_no_s1 <- kss_persistence %>%
+  filter(!is.na(run_category_bright), exp_session > 1)
+
+model_persistence_bright_categorical_no_s1 <- lmer(
+  mean_kss ~ run_category_bright + (1 | participant_id),
+  data = kss_persistence_bright_no_s1,
+  REML = FALSE
+)
+
+summary(model_persistence_bright_categorical_no_s1)
+```
+
+```{r}
+lrt_bright_no_s1 <- anova(model_persistence_bright_no_s1, model_persistence_bright_categorical_no_s1)
+print(lrt_bright_no_s1)
+```
+
+## Summary and Interpretation
+
+**Main Findings:**
+
+**Linear Models:**
+
+1. **Dim evenings (with Session 1):** No significant persistence effect (β = +0.090, p = 0.650).
+2. **Dim evenings (without Session 1):** No significant linear persistence effect (β = +0.064, p = 0.718).
+3. **Bright evenings (both analyses):** No persistence effect (β = +0.117, p = 0.393), suggesting alerting effects are maximal after the first bright evening.
+
+**Categorical Models:**
+
+Categorical models revealed non-linear patterns for dim evenings that linear models failed to detect. For dim evenings without Session 1, the categorical model showed significantly better fit than the linear model (LRT: χ² = 6.42, p = 0.011, ΔAIC = -4.4). The pattern revealed a U-shaped trajectory: sleepiness decreased on the second consecutive dim night (β = -0.571, p = 0.053, ~0.6-point reduction on KSS scale) but returned toward baseline by the third night (β = +0.309, p = 0.342). This suggests an initial alerting adaptation to dim light that diminishes with continued exposure.
+
+For bright evenings, categorical models showed no improvement over linear models (LRT: χ² < 0.001, p = 0.980, ΔAIC = +2.0), confirming that bright light-induced alertness remains stable across consecutive nights.
+
+**Conclusion:**
+
+Unlike melatonin—which showed a marginal linear increase with consecutive dim nights—subjective sleepiness exhibits non-linear dynamics under repeated dim light exposure. The U-shaped pattern suggests short-term adaptation (reduced sleepiness on night 2) followed by habituation (return to baseline by night 3+). In contrast, bright light effects on subjective alertness saturate immediately and show no cumulative changes, mirroring the melatonin suppression pattern. These exploratory findings raise the possibility of differential physiological versus subjective adaptation mechanisms, but current data are insufficient for causal inference. 
+
+
+## Summary of Exploratory Analyses
+
+The primary model (m1a: Light_Lag0_num) with Lag 0 as fixed effect and random intercepts was selected as the primary model. Sensitivity analyses support the robustness of the main findings:
+
+* **Random slopes:** Model fit was not significantly improved (χ²(2) = 3.79, p = 0.15, ΔAIC = +0.2), indicating that while some individual differences in light sensitivity may exist (random slope variance = 0.47), the current sample size (n=8) is insufficient to reliably quantify this variability. The average alerting effect remained significant but with reduced precision (β = -0.76, SE = 0.31, p = 0.040 vs. primary β = -0.75, SE = 0.21, p < 0.001).
+
+* **Demographic moderation:** Model fit was not meaningfully improved (ΔAIC = -1.8), but exploratory sex × light interaction emerged (β = +0.98, p = 0.041), suggesting potentially stronger acute light effects in females (β = -1.12) than males (β = -0.14). However, with only 3 males and 5 females, this finding requires replication in adequately powered samples before interpretation. Age showed a main effect (β = -0.24, p = 0.040) but no moderation of light sensitivity (p = 0.798).
+
+* **Light lag interactions:** Not supported (ΔAIC = +5.1, all interaction p > 0.05), confirming independent, non-additive effects across days. Marginal patterns for Lag2 main effect (p = 0.052) and Lag0 × Lag2 interaction (p = 0.068) suggest potential effects of light exposure two days prior, but these require larger samples for confirmation.
+
+* **Persistence model:** Exploratory analysis (n = 37-45 observations, 8 participants) tested whether consecutive exposure to the same light condition produces cumulative effects. Linear models showed no persistence effect for either dim nights (β = +0.064, p = 0.718) or bright nights (β = +0.117, p = 0.393). However, categorical models revealed non-linear patterns for dim evenings (LRT: χ² = 6.42, p = 0.011 without Session 1, ΔAIC = -4.4), with a U-shaped trajectory suggesting initial alerting adaptation (second night: β = -0.57, p = 0.053) that diminishes with continued exposure (third night: β = +0.31, p = 0.342). For bright evenings, categorical models showed no improvement (LRT: χ² < 0.001, p = 0.980, ΔAIC = +2.0). These findings are strictly hypothesis-generating. Future adequately powered studies (N ≥ 30, 4-5+ consecutive nights) are needed to test whether non-linear persistence dynamics reflect genuine adaptation processes.
+
+**Final model:** Model m1a (n=67) with fixed effect for Light_Lag0 and random intercepts only.
+
+----
+
+## Sensitivity Analysis: Alternative Measurement Window (Q8-Q10)
+
+### Rationale
+
+To test whether results are sensitive to the choice of measurement window, KSS scores were also averaged across questionnaires 8-10 (HBT-2h to HBT-1h) instead of 7-9 (as used as the dependent variable within the primary model)
+
+```{r}
+#| label: sensitivity-q8-10-complete-analysis
+
+# Calculate mean KSS for Q8-Q10 window
+kss_per_evening_q8_10 <- insess_surv %>%
+  filter(ques_numb %in% c(8, 9, 10)) %>%
+  mutate(
+    session_raw = as.integer(str_extract(session, "\\d+$")),
+    exp_session = case_when(
+      id %in% c("P01", "P02", "P03") ~ session_raw - 100,
+      id %in% c("P04", "P05") ~ session_raw - 200,
+      id %in% c("P06", "P07", "P09") ~ session_raw - 300,
+      id == "P10" ~ session_raw - 400,
+      TRUE ~ NA_real_
+    )
+  ) %>%
+  group_by(id, exp_session, session) %>%
+  summarise(
+    mean_kss = mean(kss, na.rm = TRUE),
+    n_measurements = n(),
+    .groups = "drop"
+  ) %>%
+  rename(participant_id = id)
+
+# Prepare LMM dataset with Q8-Q10 data
+kss_lmm_q8_10 <- map_dfr(participant_list, function(pid) {
+  df <- kss_per_evening_q8_10 %>%
+    filter(participant_id == pid) %>%
+    select(participant_id, exp_session, mean_kss)
+  
+  light_df <- tibble(
+    exp_session = seq_along(light_patterns[[pid]]),
+    Light_Lag0 = light_patterns[[pid]]
+  )
+  
+  df %>% left_join(light_df, by = "exp_session")
+})
+
+kss_lmm_q8_10 <- kss_lmm_q8_10 %>%
+  group_by(participant_id) %>%
+  arrange(exp_session) %>%
+  mutate(
+    Light_Lag1 = lag(Light_Lag0, 1),
+    Light_Lag2 = lag(Light_Lag0, 2),
+    Light_Lag0_num = ifelse(Light_Lag0 == "D", 0, 1),
+    Light_Lag1_num = ifelse(Light_Lag1 == "D", 0, 1),
+    Light_Lag2_num = ifelse(Light_Lag2 == "D", 0, 1)
+  ) %>%
+  ungroup() %>%
+  filter(!is.na(Light_Lag0) & !is.na(Light_Lag1) & !is.na(Light_Lag2)) %>%
+  filter(!(participant_id == "P10" & exp_session %in% c(6, 7))) %>%
+  left_join(participant_demographics, by = "participant_id") %>%
+  mutate(age_c = age - mean(age))
+
+# Fit model (same structure to m1a)
+m1a_q8_10 <- lmer(
+  mean_kss ~ Light_Lag0_num + 
+    (1 | participant_id),
+  data = kss_lmm_q8_10,
+  REML = FALSE
+)
+
+summary(m1a_q8_10)
+
+# Fit model (same structure to m1b)
+m1b_q8_10 <- lmer (
+  mean_kss ~ Light_Lag0_num + Light_Lag1_num +
+    (1 | participant_id),
+  data = kss_lmm_q8_10,
+  REML = FALSE
+)
+
+summary(m1b_q8_10)
+
+# Fit model (same structure to m1c)
+m1c_q8_10 <- lmer (
+  mean_kss ~ Light_Lag0_num + Light_Lag1_num + Light_Lag2_num +
+    (1 | participant_id),
+  data = kss_lmm_q8_10,
+  REML = FALSE
+)
+
+summary(m1c_q8_10)
+
+
+# Extract coefficients and compare
+coefs_q7_9 <- summary(m1a)$coefficients
+coefs_q8_10 <- summary(m1a_q8_10)$coefficients
+
+fixed_names <- rownames(coefs_q7_9)[rownames(coefs_q7_9) != "(Intercept)"]
+
+p_raw_q8_10 <- coefs_q8_10[fixed_names, "Pr(>|t|)"]
+p_BH_q8_10 <- p.adjust(p_raw_q8_10, method = "BH")
+
+window_comparison <- data.frame(
+  Effect = fixed_names,
+  Q7_Q9_Beta = coefs_q7_9[fixed_names, "Estimate"],
+  Q7_Q9_SE = coefs_q7_9[fixed_names, "Std. Error"],
+  Q7_Q9_p_BH = p.adjust(coefs_q7_9[fixed_names, "Pr(>|t|)"], method = "BH"),
+  Q8_Q10_Beta = coefs_q8_10[fixed_names, "Estimate"],
+  Q8_Q10_SE = coefs_q8_10[fixed_names, "Std. Error"],
+  Q8_Q10_p_BH = p_BH_q8_10,
+  Delta_Beta = coefs_q8_10[fixed_names, "Estimate"] - coefs_q7_9[fixed_names, "Estimate"],
+  Pct_Change = 100 * (coefs_q8_10[fixed_names, "Estimate"] - coefs_q7_9[fixed_names, "Estimate"]) / 
+                abs(coefs_q7_9[fixed_names, "Estimate"])
+)
+
+window_comparison %>%
+  kable(digits = 3, 
+        caption = "Sensitivity Analysis: Q7-Q9 vs Q8-Q10 Measurement Windows",
+        col.names = c("Effect", "β (Q7-Q9)", "SE", "p (BH)", 
+                      "β (Q8-Q10)", "SE", "p (BH)", "Δβ", "% Change")) %>%
+  kable_styling(full_width = FALSE)
+
+# Variance components
+vc_q7_9 <- as.data.frame(VarCorr(m1a))
+vc_q8_10 <- as.data.frame(VarCorr(m1a_q8_10))
+
+icc_q7_9 <- vc_q7_9$vcov[1] / sum(vc_q7_9$vcov)
+icc_q8_10 <- vc_q8_10$vcov[1] / sum(vc_q8_10$vcov)
+```
+
+**Interpretation:** 
+
+Both measurement windows confirmed highly significant acute light effects on subjective sleepiness (Q7-Q9: β = -0.752, p = 0.002; Q8-Q10: β = -1.011, p < 0.001), with no carryover effects from previous evenings (Lag1, Lag2: both n.s.). The Lag 0 effect was 34% stronger effect in Q8-Q10 measurement window compared to the Q7-9 measurement window.
+
+**Conclusion:** The Q7-Q9 window is retained as primary. because it captures the full temporal trajectory of light-induced alertness from early through sustained responses, and represents a conservative estimate of light's alerting effect. The stronger effect when Q7 is excluded validates rather than challenges the inclusion of early responses in the primary analysis.
+
+## Model Comparison: Overview
+
+Comprehensive comparison of all tested models with key parameter estimates.
+```{r}
+#| label: kss-model-overview-extended
+
+# Helper functions to extract coefficients from LMM
+get_coef_lmm <- function(model, coef_name) {
+  coefs <- summary(model)$coefficients
+  if (coef_name %in% rownames(coefs)) {
+    return(coefs[coef_name, "Estimate"])
+  } else {
+    return(NA)
+  }
+}
+
+get_p_lmm <- function(model, coef_name) {
+  coefs <- summary(model)$coefficients
+  if (coef_name %in% rownames(coefs)) {
+    return(coefs[coef_name, "Pr(>|t|)"])
+  } else {
+    return(NA)
+  }
+}
+
+# For weighted model (lme)
+get_coef_lme <- function(model, coef_name) {
+  coefs <- summary(model)$tTable
+  if (coef_name %in% rownames(coefs)) {
+    return(coefs[coef_name, "Value"])
+  } else {
+    return(NA)
+  }
+}
+
+get_p_lme <- function(model, coef_name) {
+  coefs <- summary(model)$tTable
+  if (coef_name %in% rownames(coefs)) {
+    return(coefs[coef_name, "p-value"])
+  } else {
+    return(NA)
+  }
+}
+
+# Create extended comparison table
+model_comparison_extended <- data.frame(
+  Model = c(
+    "m0 (Baseline)",
+    "m1a (Lag 0)",
+    "m1b (Lag 0+1)",
+    "m1c (Lag 0+1+2)",
+    "m2 (+ Session)",
+    "m3 (+ Session²)",
+    "m1a_weighted",
+    "m1a_robust",
+    "Random Slopes",
+    "Demographics",
+    "Light Interactions",
+    "Q8-Q10 Window",
+    "Persistence Dim (S1)",
+    "Persistence Dim (no S1)",
+    "Persistence Bright (S1)",
+    "Persistence Bright (no S1)"
+  ),
+  
+  Description = c(
+    "Intercept only",
+    "Light Lag 0 only",
+    "Lag 0 + Lag 1",
+    "Lag 0 + Lag 1 + Lag 2",
+    "Lag 0 + session (linear)",
+    "Lag 0 + session + session²",
+    "m1a with variance weights",
+    "m1a without influential obs.",
+    "m1a + random slope Lag0",
+    "m1a + age + sex + interactions",
+    "m1a + Light lag interactions",
+    "m1a with Q8-Q10 measurement",
+    "Dim: run_length (with Session 1)",
+    "Dim: run_length (without Session 1)",
+    "Bright: run_length (with Session 1)",
+    "Bright: run_length (without Session 1)"
+  ),
+  
+  npar = c(
+    attr(logLik(m0), "df"),
+    attr(logLik(m1a), "df"),
+    attr(logLik(m1b), "df"),
+    attr(logLik(m1c), "df"),
+    attr(logLik(m2), "df"),
+    attr(logLik(m3), "df"),
+    attr(logLik(m1a_weighted), "df"),
+    attr(logLik(m1a_robust), "df"),
+    attr(logLik(m1a_random_slope), "df"),
+    attr(logLik(m1a_moderation), "df"),
+    attr(logLik(m1a_interactions), "df"),
+    attr(logLik(m1a_q8_10), "df"),
+    attr(logLik(model_persistence_dim_numeric), "df"),
+    attr(logLik(model_persistence_dim_no_s1), "df"),
+    attr(logLik(model_persistence_bright_numeric), "df"),
+    attr(logLik(model_persistence_bright_no_s1), "df")
+  ),
+  
+  N_obs = c(
+    nrow(kss_lmm),
+    nrow(kss_lmm),
+    nrow(kss_lmm),
+    nrow(kss_lmm),
+    nrow(kss_lmm),
+    nrow(kss_lmm),
+    nrow(kss_lmm),
+    nrow(kss_lmm_robust),
+    nrow(kss_lmm),
+    nrow(kss_lmm),
+    nrow(kss_lmm),
+    nrow(kss_lmm_q8_10),
+    45,  # Dim with S1
+    37,  # Dim without S1
+    40,  # Bright with S1
+    40   # Bright without S1
+  ),
+  
+  AIC = c(
+    round(AIC(m0), 1),
+    round(AIC(m1a), 1),
+    round(AIC(m1b), 1),
+    round(AIC(m1c), 1),
+    round(AIC(m2), 1),
+    round(AIC(m3), 1),
+    round(AIC(m1a_weighted), 1),
+    round(AIC(m1a_robust), 1),
+    round(AIC(m1a_random_slope), 1),
+    round(AIC(m1a_moderation), 1),
+    round(AIC(m1a_interactions), 1),
+    round(AIC(m1a_q8_10), 1),
+    round(AIC(model_persistence_dim_numeric), 1),
+    round(AIC(model_persistence_dim_no_s1), 1),
+    round(AIC(model_persistence_bright_numeric), 1),
+    round(AIC(model_persistence_bright_no_s1), 1)
+  ),
+  
+  BIC = c(
+    round(BIC(m0), 1),
+    round(BIC(m1a), 1),
+    round(BIC(m1b), 1),
+    round(BIC(m1c), 1),
+    round(BIC(m2), 1),
+    round(BIC(m3), 1),
+    round(BIC(m1a_weighted), 1),
+    round(BIC(m1a_robust), 1),
+    round(BIC(m1a_random_slope), 1),
+    round(BIC(m1a_moderation), 1),
+    round(BIC(m1a_interactions), 1),
+    round(BIC(m1a_q8_10), 1),
+    round(BIC(model_persistence_dim_numeric), 1),
+    round(BIC(model_persistence_dim_no_s1), 1),
+    round(BIC(model_persistence_bright_numeric), 1),
+    round(BIC(model_persistence_bright_no_s1), 1)
+  ),
+  
+  Main_Beta = c(
+    NA,
+    round(get_coef_lmm(m1a, "Light_Lag0_num"), 3),
+    round(get_coef_lmm(m1b, "Light_Lag0_num"), 3),
+    round(get_coef_lmm(m1c, "Light_Lag0_num"), 3),
+    round(get_coef_lmm(m2, "Light_Lag0_num"), 3),
+    round(get_coef_lmm(m3, "Light_Lag0_num"), 3),
+    round(get_coef_lme(m1a_weighted, "Light_Lag0_num"), 3),
+    round(get_coef_lmm(m1a_robust, "Light_Lag0_num"), 3),
+    round(get_coef_lmm(m1a_random_slope, "Light_Lag0_num"), 3),
+    round(get_coef_lmm(m1a_moderation, "Light_Lag0_num"), 3),
+    round(get_coef_lmm(m1a_interactions, "Light_Lag0_num"), 3),
+    round(get_coef_lmm(m1a_q8_10, "Light_Lag0_num"), 3),
+    round(get_coef_lmm(model_persistence_dim_numeric, "run_length_dim"), 3),
+    round(get_coef_lmm(model_persistence_dim_no_s1, "run_length_dim"), 3),
+    round(get_coef_lmm(model_persistence_bright_numeric, "run_length_bright"), 3),
+    round(get_coef_lmm(model_persistence_bright_no_s1, "run_length_bright"), 3)
+  ),
+  
+  Effect_KSS = c(
+    NA,
+    paste0(round(abs(get_coef_lmm(m1a, "Light_Lag0_num")), 2), " pts"),
+    paste0(round(abs(get_coef_lmm(m1b, "Light_Lag0_num")), 2), " pts"),
+    paste0(round(abs(get_coef_lmm(m1c, "Light_Lag0_num")), 2), " pts"),
+    paste0(round(abs(get_coef_lmm(m2, "Light_Lag0_num")), 2), " pts"),
+    paste0(round(abs(get_coef_lmm(m3, "Light_Lag0_num")), 2), " pts"),
+    paste0(round(abs(get_coef_lme(m1a_weighted, "Light_Lag0_num")), 2), " pts"),
+    paste0(round(abs(get_coef_lmm(m1a_robust, "Light_Lag0_num")), 2), " pts"),
+    paste0(round(abs(get_coef_lmm(m1a_random_slope, "Light_Lag0_num")), 2), " pts"),
+    paste0(round(abs(get_coef_lmm(m1a_moderation, "Light_Lag0_num")), 2), " pts"),
+    paste0(round(abs(get_coef_lmm(m1a_interactions, "Light_Lag0_num")), 2), " pts"),
+    paste0(round(abs(get_coef_lmm(m1a_q8_10, "Light_Lag0_num")), 2), " pts"),
+    paste0(round(get_coef_lmm(model_persistence_dim_numeric, "run_length_dim"), 2), " pts/day"),
+    paste0(round(get_coef_lmm(model_persistence_dim_no_s1, "run_length_dim"), 2), " pts/day"),
+    paste0(round(get_coef_lmm(model_persistence_bright_numeric, "run_length_bright"), 2), " pts/day"),
+    paste0(round(get_coef_lmm(model_persistence_bright_no_s1, "run_length_bright"), 2), " pts/day")
+  ),
+  
+  Main_p = c(
+    NA,
+    format.pval(get_p_lmm(m1a, "Light_Lag0_num"), digits = 3, eps = 0.001),
+    format.pval(get_p_lmm(m1b, "Light_Lag0_num"), digits = 3, eps = 0.001),
+    format.pval(get_p_lmm(m1c, "Light_Lag0_num"), digits = 3, eps = 0.001),
+    format.pval(get_p_lmm(m2, "Light_Lag0_num"), digits = 3, eps = 0.001),
+    format.pval(get_p_lmm(m3, "Light_Lag0_num"), digits = 3, eps = 0.001),
+    format.pval(get_p_lme(m1a_weighted, "Light_Lag0_num"), digits = 3, eps = 0.001),
+    format.pval(get_p_lmm(m1a_robust, "Light_Lag0_num"), digits = 3, eps = 0.001),
+    format.pval(get_p_lmm(m1a_random_slope, "Light_Lag0_num"), digits = 3, eps = 0.001),
+    format.pval(get_p_lmm(m1a_moderation, "Light_Lag0_num"), digits = 3, eps = 0.001),
+    format.pval(get_p_lmm(m1a_interactions, "Light_Lag0_num"), digits = 3, eps = 0.001),
+    format.pval(get_p_lmm(m1a_q8_10, "Light_Lag0_num"), digits = 3, eps = 0.001),
+    format.pval(get_p_lmm(model_persistence_dim_numeric, "run_length_dim"), digits = 3, eps = 0.001),
+    format.pval(get_p_lmm(model_persistence_dim_no_s1, "run_length_dim"), digits = 3, eps = 0.001),
+    format.pval(get_p_lmm(model_persistence_bright_numeric, "run_length_bright"), digits = 3, eps = 0.001),
+    format.pval(get_p_lmm(model_persistence_bright_no_s1, "run_length_bright"), digits = 3, eps = 0.001)
+  ),
+  
+  Status = c(
+    "Baseline",
+    "FINAL MODEL",
+    "Not selected",
+    "Not selected",
+    "Not selected",
+    "Not selected",
+    "Sensitivity",
+    "Sensitivity",
+    "Exploratory",
+    "Exploratory",
+    "Exploratory",
+    "Sensitivity",
+    "Exploratory",
+    "Exploratory",
+    "Exploratory",
+    "Exploratory"
+  )
+)
+
+kable(model_comparison_extended, 
+      caption = "Model Comparison: All Tested Models with Key Parameters (KSS)",
+      align = c('l', 'l', 'c', 'c', 'c', 'c', 'c', 'c', 'c', 'l'),
+      col.names = c("Model", "Description", "npar", "N", "AIC", "BIC", 
+                    "Main β", "Effect", "Main p", "Status")) %>%
+  kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover")) %>%
+  row_spec(2, bold = TRUE, background = "#D6EAF8") %>%  # Highlight m1a (row 2) in BLUE
+  pack_rows("Hierarchical Model Building (n=67)", 1, 6) %>%
+  pack_rows("Sensitivity Analyses (n=65-67)", 7, 8) %>%
+  pack_rows("Exploratory Analyses", 9, 16)
+```
+
+**Note:** npar = number of parameters; Lag0 β = acute light effect; p-values are raw (not BH-corrected for comparison purposes).
+
+## Primary Model: Fixed Effects
+```{r}
+#| label: primary-results
+
+# Extract and format coefficients
+coefs_m1a <- summary(m1a)$coefficients
+all_names <- rownames(coefs_m1a)
+
+# Apply BH correction
+p_raw_all <- coefs_m1a[, "Pr(>|t|)"]
+p_BH_all <- p.adjust(p_raw_all, method = "BH")
+
+# Simple results table
+data.frame(
+  Effect = all_names,
+  Estimate = round(coefs_m1a[, "Estimate"], 3),
+  SE = round(coefs_m1a[, "Std. Error"], 3),
+  t = round(coefs_m1a[, "t value"], 3),
+  p_raw = round(p_raw_all, 3),
+  p_BH = round(p_BH_all, 3)
+) %>%
+  kable(caption = "Primary Model: Fixed Effects (BH-corrected)",
+        col.names = c("Effect", "Estimate", "SE", "t", "p", "p (BH)")) %>%
+  kable_styling(full_width = FALSE)
+
+# Variance components
+vc <- as.data.frame(VarCorr(m1a))
+icc <- vc$vcov[1] / sum(vc$vcov)
+
+cat("\n**Variance Components:**\n")
+cat("Between-participant:", round(vc$vcov[1], 3), "\n")
+cat("Within-participant:", round(vc$vcov[2], 3), "\n")
+cat("ICC:", round(icc, 3), "\n\n")
+
+cat("**Model Fit:**\n")
+cat("AIC:", round(AIC(m1a), 2), "| BIC:", round(BIC(m1a), 2), "\n")
+cat("N obs:", nobs(m1a), "| N groups:", length(unique(kss_lmm$participant_id)))
+```
+
+**Interpretation:** Current evening light exposure (Lag0) significantly reduced subjective sleepiness (β = -0.752, SE = 0.212, p < 0.001 after BH correction). No carryover effects from previous evenings (Lag1: p = 0.551; Lag2: p = 0.551) were detected in this study.
+
