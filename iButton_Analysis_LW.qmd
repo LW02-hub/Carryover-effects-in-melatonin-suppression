@@ -1,0 +1,5216 @@
+---
+title: "Skin Temperature (iButtons) Analysis"
+subtitle: "Carryover effects in melatonin suppression"
+author: "Letizia Woerrlein"
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    toc-location: left
+    number-sections: true
+    code-fold: show
+    code-tools: true
+    embed-resources: true
+    theme: cosmo
+    fig-width: 10
+    fig-height: 8
+  pdf:
+    toc: true
+    number-sections: true
+    colorlinks: true
+execute:
+  warning: false
+  message: false
+  cache: false
+editor: visual
+---
+
+# Overview
+
+This document processes iButton skin temperature data (ankle and neck sensors) for all participants across all laboratory sessions.
+
+**Expected Output Dataset:** ibuttons with columns: - id: Participant ID (P01-P10, excluding P08 and P11) - timestamp: Date-time in format YYYYMMDDTHHMMSS - session: Session identifier (C01_01 = Group 1, Evening 1) - ankle: Skin temperature at ankle (°C) - neck: Skin temperature at neck (°C) - DPG: Distal-Proximal Gradient (ankle - neck, °C)
+
+**Data Processing:** First single files (2 per person per evening) will be merged into one dataset, which will then be used for the subsequent analyses.
+
+**Missing Data:** For session 01 for participant P01 the sampling rate of the iButton sensor on the neck was set to a sampling interval of 1h instead of 1m, therefore data is missing for P01 session 01. Furthermore due to issues with the iButtons software there is missing data for subject P05 for the last experimental session.
+
+# Load Required Packages
+
+```{r setup}
+library(dplyr)
+library(lubridate)
+library(readxl)
+library(tidyverse)
+library(openxlsx)
+library(DT)
+library(kableExtra)
+library(zoo)
+library(patchwork)
+library(ggtext)
+library(lme4)        
+library(lmerTest)   
+library(performance) 
+library(car)         
+library(ggplot2)     
+library(purrr)  
+library(influence.ME) 
+library(clubSandwich) 
+library(nlme)         
+library(moments)    
+library(performance)
+```
+
+# Define Output Path
+
+```{r define-output}
+# Output directory and filename
+output_dir <- "C:/Users/anton/OneDrive/AfterGlow/data/derivatives"
+filename <- "01_ibuttons_cleaned_20250923T142900.xlsx"
+filepath <- file.path(output_dir, filename)
+
+# Check if file already exists
+file_exists <- file.exists(filepath)
+```
+
+# Conditional Processing
+
+```{r check-file-existence}
+if (file_exists) {
+  cat("✓ Cleaned iButtons dataset already exists at:\n")
+  cat("  ", filepath, "\n")
+  cat("  Skipping data processing.\n\n")
+  cat("To regenerate the dataset, delete the existing file first.\n")
+} else {
+  cat("✗ Cleaned iButtons dataset not found.\n")
+  cat("  Starting data processing...\n\n")
+}
+```
+
+# Data Processing
+
+## Session Times Definition
+
+```{r session-times}
+#| eval: !expr '!file_exists'
+
+# Define session start and end times for each participant
+P01_session_times <- tibble::tibble(
+  session = as.character(101:111),
+  start_time = rep("18:30", 11),
+  end_time = rep("23:30", 11)
+)
+
+P02_session_times <- tibble::tibble(
+  session = as.character(101:111),
+  start_time = rep("18:30", 11),
+  end_time = rep("23:30", 11)
+)
+
+P03_session_times <- tibble::tibble(
+  session = as.character(101:111),
+  start_time = rep("18:30", 11),
+  end_time = rep("23:30", 11)
+)
+
+P04_session_times <- tibble::tibble(
+  session = as.character(101:110),
+  start_time = rep("16:30", 10),
+  end_time = rep("21:30", 10)
+)
+
+P05_session_times <- tibble::tibble(
+  session = as.character(101:110),
+  start_time = rep("16:30", 10),
+  end_time = rep("21:30", 10)
+)
+
+P06_session_times <- tibble::tibble(
+  session = as.character(101:110),
+  start_time = rep("18:00", 10),
+  end_time = rep("23:00", 10)
+)
+
+P07_session_times <- tibble::tibble(
+  session = as.character(101:110),
+  start_time = rep("18:00", 10),
+  end_time = rep("23:00", 10)
+)
+
+P09_session_times <- tibble::tibble(
+  session = as.character(101:110),
+  start_time = rep("18:00", 10),
+  end_time = rep("23:00", 10)
+)
+
+P10_session_times <- tibble::tibble(
+  session = as.character(101:113),
+  start_time = rep("17:30", 13),
+  end_time = rep("22:30", 13)
+)
+```
+
+## Processing Function
+
+```{r processing-function}
+#| eval: !expr '!file_exists'
+
+# Function to prepare iButton data with error handling
+prepare_ibutton <- function(file_path, session, participant, position, session_times_df) {
+  
+  # Check if file exists
+  if (!file.exists(file_path)) {
+    cat("Warning: File does not exist:", file_path, "- Returning NA data\n")
+    
+    # Create a minimal dataset with NA values
+    na_df <- data.frame(
+      timestamp = "01.01.2000 00:00",
+      stringsAsFactors = FALSE
+    )
+    na_df[[position]] <- NA_real_
+    return(na_df)
+  }
+  
+  # Extract session-specific start/end times
+  times <- session_times_df %>% filter(session == !!session)
+  start_time <- times$start_time
+  end_time   <- times$end_time
+  
+  # Read Excel and process
+  tryCatch({
+    df <- read_excel(file_path, skip = 24) %>%
+      mutate(
+        Date = trimws(Date),
+        Time = trimws(Time),
+        datetime_full = parse_date_time(paste(Date, Time), orders = c("ymd HMS", "ymd HM")),
+        datetime = round_date(datetime_full, unit = "minute"),
+        datetime_formatted = format(datetime, "%d.%m.%Y %H:%M")
+      ) %>%
+      select(-datetime_full) %>%
+      rename(timestamp = datetime_formatted) %>%
+      select(timestamp, everything(), -Date, -Time, -datetime) %>%
+      rename(!!paste0(position) := Value) %>%
+      slice(-n()) %>%   
+      mutate(
+        timestamp_dt = dmy_hm(timestamp),
+        time_only = format(timestamp_dt, "%H:%M")
+      ) %>%
+      filter(time_only >= start_time & time_only <= end_time) %>%
+      select(-timestamp_dt, -time_only)
+    
+    return(df)
+  }, error = function(e) {
+    cat("Error reading file:", file_path, "- Error:", e$message, "- Returning NA data\n")
+    
+    # Create a minimal dataset with NA values
+    na_df <- data.frame(
+      timestamp = "01.01.2000 00:00",
+      stringsAsFactors = FALSE
+    )
+    na_df[[position]] <- NA_real_
+    return(na_df)
+  })
+}
+```
+
+## File Paths
+
+```{r file-paths}
+#| eval: !expr '!file_exists'
+
+# Define sessions for each group
+sessions_group1 <- as.character(101:111)  # P01, P02, P03 (11 sessions)
+sessions_group2 <- as.character(101:110)  # P04, P05 (10 sessions)
+sessions_group3 <- as.character(101:110)  # P06, P07, P09 (10 sessions)
+sessions_group4 <- as.character(101:113)  # P10 (13 sessions)
+
+# P01 file paths
+ankle_paths_P01 <- paste0("C:/Users/anton/OneDrive/AfterGlow/data/raw/P01/",
+                          sprintf("%02d", 1:11), "_expsession/ibuttons/01_ibutton-ankle_",
+                          c("20250616T233000", "20250617T233000", "20250618T233000", "20250619T233000",
+                            "20250620T233000", "20250621T233000", "20250622T233000", "20250623T233000",
+                            "20250624T233000", "20250625T233000", "20250626T233000"), ".xlsx")
+
+neck_paths_P01 <- paste0("C:/Users/anton/OneDrive/AfterGlow/data/raw/P01/",
+                         sprintf("%02d", 1:11), "_expsession/ibuttons/01_ibutton-neck_",
+                         c("20250616T233000", "20250617T233000", "20250618T233000", "20250619T233000",
+                           "20250620T233000", "20250621T233000", "20250622T233000", "20250623T233000",
+                           "20250624T233000", "20250625T233000", "20250626T233000"), ".xlsx")
+
+# P02 file paths
+ankle_paths_P02 <- paste0("C:/Users/anton/OneDrive/AfterGlow/data/raw/P02/",
+                          sprintf("%02d", 1:11), "_expsession/ibuttons/01_ibutton-ankle_",
+                          c("20250616T233000", "20250617T233000", "20250618T233000", "20250619T233000",
+                            "20250620T233000", "20250621T233000", "20250622T233000", "20250623T233000",
+                            "20250624T233000", "20250625T233000", "20250626T233000"), ".xlsx")
+
+neck_paths_P02 <- paste0("C:/Users/anton/OneDrive/AfterGlow/data/raw/P02/",
+                         sprintf("%02d", 1:11), "_expsession/ibuttons/01_ibutton-neck_",
+                         c("20250616T233000", "20250617T233000", "20250618T233000", "20250619T233000",
+                           "20250620T233000", "20250621T233000", "20250622T233000", "20250623T233000",
+                           "20250624T233000", "20250625T233000", "20250626T233000"), ".xlsx")
+
+# P03 file paths
+ankle_paths_P03 <- paste0("C:/Users/anton/OneDrive/AfterGlow/data/raw/P03/",
+                          sprintf("%02d", 1:11), "_expsession/ibuttons/01_ibutton-ankle_",
+                          c("20250616T233000", "20250617T233000", "20250618T233000", "20250619T233000",
+                            "20250620T233000", "20250621T233000", "20250622T233000", "20250623T233000",
+                            "20250624T233000", "20250625T233000", "20250626T233000"), ".xlsx")
+
+neck_paths_P03 <- paste0("C:/Users/anton/OneDrive/AfterGlow/data/raw/P03/",
+                         sprintf("%02d", 1:11), "_expsession/ibuttons/01_ibutton-neck_",
+                         c("20250616T233000", "20250617T233000", "20250618T233000", "20250619T233000",
+                           "20250620T233000", "20250621T233000", "20250622T233000", "20250623T233000",
+                           "20250624T233000", "20250625T233000", "20250626T233000"), ".xlsx")
+
+# P04 file paths
+ankle_paths_P04 <- paste0("C:/Users/anton/OneDrive/AfterGlow/data/raw/P04/",
+                          sprintf("%02d", 1:10), "_expsession/ibuttons/01_ibutton-ankle_",
+                          c("20250630T213000", "20250701T213000", "20250702T213000", "20250703T213000",
+                            "20250704T213000", "20250705T213000", "20250706T213000", "20250707T213000",
+                            "20250708T213000", "20250709T213000"), ".xlsx")
+
+neck_paths_P04 <- paste0("C:/Users/anton/OneDrive/AfterGlow/data/raw/P04/",
+                         sprintf("%02d", 1:10), "_expsession/ibuttons/01_ibutton-neck_",
+                         c("20250630T213000", "20250701T213000", "20250702T213000", "20250703T213000",
+                           "20250704T213000", "20250705T213000", "20250706T213000", "20250707T213000",
+                           "20250708T213000", "20250709T213000"), ".xlsx")
+
+# P05 file paths
+ankle_paths_P05 <- paste0("C:/Users/anton/OneDrive/AfterGlow/data/raw/P05/",
+                          sprintf("%02d", 1:10), "_expsession/ibuttons/01_ibutton-ankle_",
+                          c("20250630T213000", "20250701T213000", "20250702T213000", "20250703T213000",
+                            "20250704T213000", "20250705T213000", "20250706T213000", "20250707T213000",
+                            "20250708T213000", "20250709T213000"), ".xlsx")
+
+neck_paths_P05 <- paste0("C:/Users/anton/OneDrive/AfterGlow/data/raw/P05/",
+                         sprintf("%02d", 1:10), "_expsession/ibuttons/01_ibutton-neck_",
+                         c("20250630T213000", "20250701T213000", "20250702T213000", "20250703T213000",
+                           "20250704T213000", "20250705T213000", "20250706T213000", "20250707T213000",
+                           "20250708T213000", "20250709T213000"), ".xlsx")
+
+# P06 file paths
+ankle_paths_P06 <- paste0("C:/Users/anton/OneDrive/AfterGlow/data/raw/P06/",
+                          sprintf("%02d", 1:10), "_expsession/ibuttons/01_ibutton-ankle_",
+                          c("20250728T230000", "20250729T230000", "20250730T230000", "20250731T230000",
+                            "20250801T230000", "20250802T230000", "20250803T230000", "20250804T230000",
+                            "20250805T230000", "20250806T230000"), ".xlsx")
+
+neck_paths_P06 <- paste0("C:/Users/anton/OneDrive/AfterGlow/data/raw/P06/",
+                         sprintf("%02d", 1:10), "_expsession/ibuttons/01_ibutton-neck_",
+                         c("20250728T230000", "20250729T230000", "20250730T230000", "20250731T230000",
+                           "20250801T230000", "20250802T230000", "20250803T230000", "20250804T230000",
+                           "20250805T230000", "20250806T230000"), ".xlsx")
+
+# P07 file paths
+ankle_paths_P07 <- paste0("C:/Users/anton/OneDrive/AfterGlow/data/raw/P07/",
+                          sprintf("%02d", 1:10), "_expsession/ibuttons/01_ibutton-ankle_",
+                          c("20250728T230000", "20250729T230000", "20250730T230000", "20250731T230000",
+                            "20250801T230000", "20250802T230000", "20250803T230000", "20250804T230000",
+                            "20250805T230000", "20250806T230000"), ".xlsx")
+
+neck_paths_P07 <- paste0("C:/Users/anton/OneDrive/AfterGlow/data/raw/P07/",
+                         sprintf("%02d", 1:10), "_expsession/ibuttons/01_ibutton-neck_",
+                         c("20250728T230000", "20250729T230000", "20250730T230000", "20250731T230000",
+                           "20250801T230000", "20250802T230000", "20250803T230000", "20250804T230000",
+                           "20250805T230000", "20250806T230000"), ".xlsx")
+
+# P09 file paths
+ankle_paths_P09 <- paste0("C:/Users/anton/OneDrive/AfterGlow/data/raw/P09/",
+                          sprintf("%02d", 1:10), "_expsession/ibuttons/01_ibutton-ankle_",
+                          c("20250728T230000", "20250729T230000", "20250730T230000", "20250731T230000",
+                            "20250801T230000", "20250802T230000", "20250803T230000", "20250804T230000",
+                            "20250805T230000", "20250806T230000"), ".xlsx")
+
+neck_paths_P09 <- paste0("C:/Users/anton/OneDrive/AfterGlow/data/raw/P09/",
+                         sprintf("%02d", 1:10), "_expsession/ibuttons/01_ibutton-neck_",
+                         c("20250728T230000", "20250729T230000", "20250730T230000", "20250731T230000",
+                           "20250801T230000", "20250802T230000", "20250803T230000", "20250804T230000",
+                           "20250805T230000", "20250806T230000"), ".xlsx")
+
+# P10 file paths
+ankle_paths_P10 <- paste0("C:/Users/anton/OneDrive/AfterGlow/data/raw/P10/",
+                          sprintf("%02d", 1:13), "_expsession/ibuttons/01_ibutton-ankle_",
+                          c("20250811T223000", "20250812T223000", "20250813T223000", "20250814T223000",
+                            "20250815T223000", "20250816T223000", "20250817T223000", "20250818T223000",
+                            "20250819T223000", "20250820T223000", "20250821T223000", "20250822T223000",
+                            "20250823T223000"), ".xlsx")
+
+neck_paths_P10 <- paste0("C:/Users/anton/OneDrive/AfterGlow/data/raw/P10/",
+                         sprintf("%02d", 1:13), "_expsession/ibuttons/01_ibutton-neck_",
+                         c("20250811T223000", "20250812T223000", "20250813T223000", "20250814T223000",
+                           "20250815T223000", "20250816T223000", "20250817T223000", "20250818T223000",
+                           "20250819T223000", "20250820T223000", "20250821T223000", "20250822T223000",
+                           "20250823T223000"), ".xlsx")
+```
+
+## Helper Functions
+
+```{r helper-functions}
+#| eval: !expr '!file_exists'
+
+# Function to get session times for participant
+get_session_times <- function(participant) {
+  switch(participant,
+         "P01" = P01_session_times,
+         "P02" = P02_session_times,
+         "P03" = P03_session_times,
+         "P04" = P04_session_times,
+         "P05" = P05_session_times,
+         "P06" = P06_session_times,
+         "P07" = P07_session_times,
+         "P09" = P09_session_times,
+         "P10" = P10_session_times,
+         stop("Unknown participant: ", participant)
+  )
+}
+
+# Function to get sessions for participant (different for each group)
+get_sessions <- function(participant) {
+  if (participant %in% c("P01", "P02", "P03")) {
+    return(sessions_group1)  # 101:111 (11 sessions)
+  } else if (participant %in% c("P04", "P05")) {
+    return(sessions_group2)  # 101:110 (10 sessions)  
+  } else if (participant %in% c("P06", "P07", "P09")) {
+    return(sessions_group3)  # 101:110 (10 sessions)
+  } else if (participant == "P10") {
+    return(sessions_group4)  # 101:113 (13 sessions)
+  } else {
+    stop("Unknown participant: ", participant)
+  }
+}
+
+# Function to get file paths for participant and position
+get_file_paths <- function(participant, position) {
+  path_name <- paste0(tolower(position), "_paths_", participant)
+  switch(path_name,
+         "ankle_paths_P01" = ankle_paths_P01,
+         "neck_paths_P01" = neck_paths_P01,
+         "ankle_paths_P02" = ankle_paths_P02,
+         "neck_paths_P02" = neck_paths_P02,
+         "ankle_paths_P03" = ankle_paths_P03,
+         "neck_paths_P03" = neck_paths_P03,
+         "ankle_paths_P04" = ankle_paths_P04,
+         "neck_paths_P04" = neck_paths_P04,
+         "ankle_paths_P05" = ankle_paths_P05,
+         "neck_paths_P05" = neck_paths_P05,
+         "ankle_paths_P06" = ankle_paths_P06,
+         "neck_paths_P06" = neck_paths_P06,
+         "ankle_paths_P07" = ankle_paths_P07,
+         "neck_paths_P07" = neck_paths_P07,
+         "ankle_paths_P09" = ankle_paths_P09,
+         "neck_paths_P09" = neck_paths_P09,
+         "ankle_paths_P10" = ankle_paths_P10,
+         "neck_paths_P10" = neck_paths_P10,
+         stop("Unknown path combination: ", path_name)
+  )
+}
+
+# Function: Convert session number to CXX_YY format based on participant
+convert_session_format <- function(session_num, participant) {
+  session_int <- as.numeric(session_num) - 100
+  
+  # Determine group based on participant
+  if (participant %in% c("P01", "P02", "P03")) {
+    return(paste0("C01_", sprintf("%02d", session_int)))
+  } else if (participant %in% c("P04", "P05")) {
+    return(paste0("C02_", sprintf("%02d", session_int)))
+  } else if (participant %in% c("P06", "P07", "P09")) {
+    return(paste0("C03_", sprintf("%02d", session_int)))
+  } else if (participant == "P10") {
+    return(paste0("C04_", sprintf("%02d", session_int)))
+  } else {
+    stop("Unknown participant group for: ", participant)
+  }
+}
+```
+
+## Process All Participants
+
+```{r process-participants}
+#| eval: !expr '!file_exists'
+
+# Initialize storage
+all_participants_data <- list()
+
+# Process all participants
+for (participant in c("P01", "P02", "P03", "P04", "P05", "P06", "P07", "P09", "P10")) {
+  
+  cat("\n=== Processing participant:", participant, "===\n")
+  
+  # Get session times and sessions for current participant
+  session_times <- get_session_times(participant)
+  participant_sessions <- get_sessions(participant)
+  
+  # Initialize list for current participant
+  participant_skin <- list()
+  
+  # Process all sessions for current participant
+  for (i in seq_along(participant_sessions)) {
+    session <- participant_sessions[i]
+    
+    # Get file paths
+    ankle_paths <- get_file_paths(participant, "ankle")
+    neck_paths <- get_file_paths(participant, "neck")
+    
+    # Prepare ankle
+    ankle_df <- prepare_ibutton(
+      file_path = ankle_paths[i],
+      session = session,
+      participant = participant,
+      position = "ankle",
+      session_times_df = session_times
+    )
+    
+    # Prepare neck
+    neck_df <- prepare_ibutton(
+      file_path = neck_paths[i],
+      session = session,
+      participant = participant,
+      position = "neck",
+      session_times_df = session_times
+    )
+    
+    # Merge ankle + neck (handle case where both might be NA datasets)
+    if (nrow(ankle_df) == 1 && nrow(neck_df) == 1 && 
+        ankle_df$timestamp[1] == "01.01.2000 00:00" && 
+        neck_df$timestamp[1] == "01.01.2000 00:00") {
+      # Both files missing - create combined NA dataset
+      participant_skin[[session]] <- data.frame(
+        timestamp = "01.01.2000 00:00",
+        ankle = NA_real_,
+        neck = NA_real_,
+        stringsAsFactors = FALSE
+      )
+      cat("  Session", session, "- Both files missing, created NA dataset\n")
+    } else {
+      # At least one file exists - merge normally
+      participant_skin[[session]] <- full_join(ankle_df, neck_df, by = "timestamp")
+      cat("  Session", session, "processed:", nrow(participant_skin[[session]]), "rows\n")
+    }
+  }
+  
+  # Store participant data
+  all_participants_data[[participant]] <- participant_skin
+}
+```
+
+## Format and Merge Data
+
+```{r format-merge}
+#| eval: !expr '!file_exists'
+
+# Initialize final data list
+ibuttons_list <- list()
+
+# Loop through all participants and sessions
+for (participant in names(all_participants_data)) {
+  participant_data <- all_participants_data[[participant]]
+  
+  cat("\n=== Processing participant:", participant, "===\n")
+  
+  # Loop through all sessions for current participant
+  for (session in names(participant_data)) {
+    
+    # Current dataset
+    current_data <- participant_data[[session]]
+    
+    # Skip empty datasets
+    if (nrow(current_data) == 0) {
+      cat("Warning: Participant", participant, "Session", session, "is empty. Skipping...\n")
+      next
+    }
+    
+    # Format final dataset
+    formatted_data <- current_data %>%
+      mutate(
+        # Add ID
+        id = participant,
+        
+        # Convert session format based on participant group
+        session = convert_session_format(session, participant),
+        
+        # Convert timestamp to YYYYMMDDTHHMMSS format
+        timestamp_dt = dmy_hm(timestamp),
+        timestamp = format(timestamp_dt, "%Y%m%dT%H%M%S"),
+        
+        # Ensure ankle and neck are numeric (convert character NAs to numeric NAs)
+        ankle = as.numeric(ankle),
+        neck = as.numeric(neck)
+      ) %>%
+      # Select columns and arrange in desired order
+      select(id, timestamp, session, ankle, neck) %>%
+      # Remove rows where timestamp conversion failed (but keep NA data rows)
+      filter(!is.na(timestamp) | (is.na(ankle) & is.na(neck)))
+    
+    # Create unique identifier for list
+    list_key <- paste(participant, session, sep = "_")
+    ibuttons_list[[list_key]] <- formatted_data
+    
+    cat("Participant", participant, "Session", session, "processed:", nrow(formatted_data), "rows\n")
+  }
+}
+
+# Merge all sessions and participants into a single dataset
+ibuttons <- bind_rows(ibuttons_list)
+```
+
+## Calculate DPG
+
+```{r calculate-dpg}
+#| eval: !expr '!file_exists'
+
+# Calculate temperature gradient: Distal-Proximal Gradient (DPG)
+# DPG = ankle - neck
+# If either ankle or neck is NA, gradient will be NA
+ibuttons <- ibuttons %>%
+  mutate(
+    DPG = ankle - neck
+  )
+```
+
+# Save Dataset
+
+```{r save-dataset}
+#| eval: !expr '!file_exists'
+
+# Create output directory if it doesn't exist
+if (!dir.exists(output_dir)) {
+  dir.create(output_dir, recursive = TRUE)
+  cat("Created directory:", output_dir, "\n")
+}
+
+# Convert entire dataset to character to preserve NAs as "NA" text
+ibuttons_for_excel <- ibuttons %>%
+  mutate(
+    id = as.character(id),
+    timestamp = as.character(timestamp),
+    session = as.character(session),
+    ankle = ifelse(is.na(ankle), "NA", as.character(ankle)),
+    neck = ifelse(is.na(neck), "NA", as.character(neck)),
+    DPG = ifelse(is.na(DPG), "NA", as.character(DPG))
+  )
+
+# Write to Excel
+write.xlsx(ibuttons_for_excel, filepath)
+cat("\n✓ Dataset saved successfully to:\n")
+cat("  ", filepath, "\n")
+```
+
+# Load Cleaned Dataset
+
+```{r load-data}
+# Load cleaned iButtons dataset
+ibuttons <- read_excel("C:/Users/anton/OneDrive/AfterGlow/data/derivatives/01_ibuttons_cleaned_20250923T142900.xlsx")
+
+# Convert columns back to proper types
+ibuttons <- ibuttons %>%
+  mutate(
+    id = as.character(id),
+    timestamp = as.character(timestamp),
+    session = as.character(session),
+    ankle = as.numeric(ankle),
+    neck = as.numeric(neck),
+    DPG = as.numeric(DPG)
+  )
+```
+
+# Clenaed Dataset Overview
+
+```{r interactive-table}
+# Create table
+datatable(
+  ibuttons,
+  options = list(
+    pageLength = 10,
+    scrollX = TRUE,
+    searching = TRUE,
+    ordering = TRUE
+  ),
+  caption = "iButtons Skin Temperature Dataset"
+)
+```
+
+# Calculate Rate of Change (ROC) for iButton data
+
+Following a similar (slightly different) approach as van Marken Lichtenbelt et al. (2006) cleaning procedure
+
+Step 1: Rate of Change (ROC) Detection: The rate of change (ROC) was calculated for each consecutive temperature measurement within each participant and session Session-specific interquartile ranges (IQR) were computed based on the 25th and 75th percentiles of ROC values Temperature changes exceeding 1.5 × IQR were flagged as artifacts, indicating sudden, implausible fluctuations
+
+Step 2: Level-Based Outlier Detection: Absolute temperature values were evaluated using session-specific IQRs (25th and 75th percentiles) Values falling outside the range \[Q1 - 1.5×IQR, Q3 + 1.5×IQR\] were flagged as outliers
+
+Step 3: Artifact Removal: If either Step 1 (ROC-based) or Step 2 (level-based) flagged a measurement as an artifact, the corresponding ankle and neck temperature values were set to NA Distal-proximal gradient (DPG) values were recalculated after artifact removal, with DPG set to NA if either ankle or neck temperature was missing
+
+```{r calculate-roc}
+# Calculate ROC separately for each participant, session, and measurement site
+ibuttons <- ibuttons %>%
+  group_by(id, session) %>%
+  arrange(id, session, timestamp) %>%
+  mutate(
+    # ROC for ankle (change per minute)
+    roc_ankle = ankle - lag(ankle),
+    
+    # ROC for neck (change per minute)
+    roc_neck = neck - lag(neck)
+  ) %>%
+  ungroup()
+```
+
+# ROC by Participant and Session
+
+```{r roc-by-session}
+# Summary by participant and session
+roc_summary <- ibuttons %>%
+  group_by(id, session) %>%
+  summarise(
+    ankle_mean_roc = mean(abs(roc_ankle), na.rm = TRUE),
+    ankle_max_roc = max(abs(roc_ankle), na.rm = TRUE),
+    neck_mean_roc = mean(abs(roc_neck), na.rm = TRUE),
+    neck_max_roc = max(abs(roc_neck), na.rm = TRUE),
+    n_obs = n(),
+    .groups = "drop"
+  )
+
+print(roc_summary)
+```
+
+# Step 1: ROC-based Outlier Detection (adapted for laboratory conditions)
+
+Approach: Using 1.5×IQR instead of 1×IQR (van Marken Lichtenbelt et al. 2006 used 1×IQR for field studies)
+
+```{r step1-roc-outliers}
+# Calculate thresholds per participant and session (1.5×IQR for lab conditions)
+roc_thresholds <- ibuttons %>%
+  group_by(id, session) %>%
+  summarise(
+    ankle_lower = quantile(roc_ankle, 0.25, na.rm = TRUE) - 1.5 * IQR(roc_ankle, na.rm = TRUE),
+    ankle_upper = quantile(roc_ankle, 0.75, na.rm = TRUE) + 1.5 * IQR(roc_ankle, na.rm = TRUE),
+    neck_lower = quantile(roc_neck, 0.25, na.rm = TRUE) - 1.5 * IQR(roc_neck, na.rm = TRUE),
+    neck_upper = quantile(roc_neck, 0.75, na.rm = TRUE) + 1.5 * IQR(roc_neck, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Flag outliers
+ibuttons <- ibuttons %>%
+  left_join(roc_thresholds, by = c("id", "session")) %>%
+  mutate(
+    outlier_roc_ankle = roc_ankle < ankle_lower | roc_ankle > ankle_upper,
+    outlier_roc_neck = roc_neck < neck_lower | roc_neck > neck_upper
+  ) %>%
+  select(-ends_with("_lower"), -ends_with("_upper"))  # GEÄNDERT
+
+cat("ROC outliers - Ankle:", sum(ibuttons$outlier_roc_ankle, na.rm = TRUE), "/", sum(!is.na(ibuttons$outlier_roc_ankle)), "\n")
+cat("ROC outliers - Neck:", sum(ibuttons$outlier_roc_neck, na.rm = TRUE), "/", sum(!is.na(ibuttons$outlier_roc_neck)), "\n")
+```
+
+# Step 2: Level-based Outlier Detection
+
+```{r step2-level-outliers}
+# Calculate thresholds for absolute temperature values (1.5×IQR for lab conditions)
+level_thresholds <- ibuttons %>%
+  group_by(id, session) %>%
+  summarise(
+    ankle_lower = quantile(ankle, 0.25, na.rm = TRUE) - 1.5 * IQR(ankle, na.rm = TRUE),
+    ankle_upper = quantile(ankle, 0.75, na.rm = TRUE) + 1.5 * IQR(ankle, na.rm = TRUE),
+    neck_lower = quantile(neck, 0.25, na.rm = TRUE) - 1.5 * IQR(neck, na.rm = TRUE),
+    neck_upper = quantile(neck, 0.75, na.rm = TRUE) + 1.5 * IQR(neck, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Flag level-based outliers
+ibuttons <- ibuttons %>%
+  left_join(level_thresholds, by = c("id", "session")) %>%
+  mutate(
+    outlier_level_ankle = ankle < ankle_lower | ankle > ankle_upper,
+    outlier_level_neck = neck < neck_lower | neck > neck_upper
+  ) %>%
+  select(-ends_with("_lower"), -ends_with("_upper"))  # GEÄNDERT
+
+cat("Level outliers - Ankle:", sum(ibuttons$outlier_level_ankle, na.rm = TRUE), "/", sum(!is.na(ibuttons$outlier_level_ankle)), "\n")
+cat("Level outliers - Neck:", sum(ibuttons$outlier_level_neck, na.rm = TRUE), "/", sum(!is.na(ibuttons$outlier_level_neck)), "\n")
+```
+
+# Combine outlier flags
+
+```{r combine-outliers}
+ibuttons <- ibuttons %>%
+  mutate(
+    outlier_ankle = outlier_roc_ankle | outlier_level_ankle,
+    outlier_neck = outlier_roc_neck | outlier_level_neck
+  )
+
+# Final summary
+cat("=== Final Outlier Summary ===\n")
+cat("Ankle:", sum(ibuttons$outlier_ankle, na.rm = TRUE), 
+    "/", sum(!is.na(ibuttons$outlier_ankle)), 
+    "(", round(100 * sum(ibuttons$outlier_ankle, na.rm = TRUE) / sum(!is.na(ibuttons$outlier_ankle)), 1), "%)\n")
+cat("Neck:", sum(ibuttons$outlier_neck, na.rm = TRUE), 
+    "/", sum(!is.na(ibuttons$outlier_neck)), 
+    "(", round(100 * sum(ibuttons$outlier_neck, na.rm = TRUE) / sum(!is.na(ibuttons$outlier_neck)), 1), "%)\n")
+```
+
+# Calculate combined outlier rate
+
+```{r calculate-combined-outliers}
+ibuttons_with_any_outlier <- ibuttons %>%
+  mutate(any_outlier = outlier_ankle | outlier_neck)
+
+n_any_outlier <- sum(ibuttons_with_any_outlier$any_outlier, na.rm = TRUE)
+n_total <- sum(!is.na(ibuttons_with_any_outlier$any_outlier))
+
+cat("Rows with ANY outlier (ankle OR neck):", n_any_outlier, "/", n_total, 
+    "(", round(100 * n_any_outlier / n_total, 1), "%)\n")
+```
+
+# Outlier distribution by session
+
+```{r analyze-outliers-by-session}
+outlier_by_session <- ibuttons %>%
+  mutate(any_outlier = outlier_ankle | outlier_neck) %>%
+  group_by(id, session) %>%
+  summarise(
+    n_total = n(),
+    n_outliers = sum(any_outlier, na.rm = TRUE),
+    pct_outliers = round(100 * n_outliers / n_total, 1),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(pct_outliers))
+
+print(head(outlier_by_session, 20))
+```
+
+Interpretation: Especially P06 shows high numbers of outliers, therefore a sensitivity analysis will be conducted excluding P06 to test robustness of findings.
+
+# Remove outliers by setting to NA
+
+```{r remove-outliers-set-na}
+ibuttons <- ibuttons %>%
+  mutate(
+    # Set ankle to NA if outlier
+    ankle = if_else(outlier_ankle, NA_real_, ankle),
+    
+    # Set neck to NA if outlier
+    neck = if_else(outlier_neck, NA_real_, neck),
+    
+    # Recalculate DPG with cleaned data
+    DPG = ankle - neck
+  )
+```
+
+# Interactive Table
+
+```{r interactive-table-cleaned}
+# Select relevant columns for display
+ibuttons_display <- ibuttons %>%
+  select(id, timestamp, session, ankle, neck, DPG)
+
+datatable(
+  ibuttons_display,
+  options = list(
+    pageLength = 25,
+    scrollX = TRUE,
+    searching = TRUE,
+    ordering = TRUE
+  ),
+  caption = "Cleaned iButtons Dataset (outliers set to NA)",
+  filter = "top"
+)
+```
+
+# Calculate 30-minute block means for DPG
+
+```{r calculate-dpg-30min-blocks}
+ibuttons <- ibuttons %>%
+  mutate(
+    time = paste0(substr(timestamp, 10, 11), ":", substr(timestamp, 12, 13)),
+    group = case_when(
+      id %in% c("P01", "P02", "P03") ~ 1,
+      id %in% c("P04", "P05") ~ 2,
+      id %in% c("P06", "P07", "P09") ~ 3,
+      id %in% c("P10") ~ 4
+    ),
+    # Assign time blocks based on group
+    time_block = case_when(
+      # Group 1: 18:30-23:30
+      group == 1 & time >= "18:30" & time < "19:00" ~ "18:30-19:00",
+      group == 1 & time >= "19:00" & time < "19:30" ~ "19:00-19:30",
+      group == 1 & time >= "19:30" & time < "20:00" ~ "19:30-20:00",
+      group == 1 & time >= "20:00" & time < "20:30" ~ "20:00-20:30",
+      group == 1 & time >= "20:30" & time < "21:00" ~ "20:30-21:00",
+      group == 1 & time >= "21:00" & time < "21:30" ~ "21:00-21:30",
+      group == 1 & time >= "21:30" & time < "22:00" ~ "21:30-22:00",
+      group == 1 & time >= "22:00" & time < "22:30" ~ "22:00-22:30",
+      group == 1 & time >= "22:30" & time < "23:00" ~ "22:30-23:00",
+      group == 1 & time >= "23:00" & time <= "23:30" ~ "23:00-23:30",
+      
+      # Group 2: 16:30-21:30
+      group == 2 & time >= "16:30" & time < "17:00" ~ "16:30-17:00",
+      group == 2 & time >= "17:00" & time < "17:30" ~ "17:00-17:30",
+      group == 2 & time >= "17:30" & time < "18:00" ~ "17:30-18:00",
+      group == 2 & time >= "18:00" & time < "18:30" ~ "18:00-18:30",
+      group == 2 & time >= "18:30" & time < "19:00" ~ "18:30-19:00",
+      group == 2 & time >= "19:00" & time < "19:30" ~ "19:00-19:30",
+      group == 2 & time >= "19:30" & time < "20:00" ~ "19:30-20:00",
+      group == 2 & time >= "20:00" & time < "20:30" ~ "20:00-20:30",
+      group == 2 & time >= "20:30" & time < "21:00" ~ "20:30-21:00",
+      group == 2 & time >= "21:00" & time <= "21:30" ~ "21:00-21:30",
+      
+      # Group 3: 18:00-23:00
+      group == 3 & time >= "18:00" & time < "18:30" ~ "18:00-18:30",
+      group == 3 & time >= "18:30" & time < "19:00" ~ "18:30-19:00",
+      group == 3 & time >= "19:00" & time < "19:30" ~ "19:00-19:30",
+      group == 3 & time >= "19:30" & time < "20:00" ~ "19:30-20:00",
+      group == 3 & time >= "20:00" & time < "20:30" ~ "20:00-20:30",
+      group == 3 & time >= "20:30" & time < "21:00" ~ "20:30-21:00",
+      group == 3 & time >= "21:00" & time < "21:30" ~ "21:00-21:30",
+      group == 3 & time >= "21:30" & time < "22:00" ~ "21:30-22:00",
+      group == 3 & time >= "22:00" & time < "22:30" ~ "22:00-22:30",
+      group == 3 & time >= "22:30" & time <= "23:00" ~ "22:30-23:00",
+      
+      # Group 4: 17:30-22:30
+      group == 4 & time >= "17:30" & time < "18:00" ~ "17:30-18:00",
+      group == 4 & time >= "18:00" & time < "18:30" ~ "18:00-18:30",
+      group == 4 & time >= "18:30" & time < "19:00" ~ "18:30-19:00",
+      group == 4 & time >= "19:00" & time < "19:30" ~ "19:00-19:30",
+      group == 4 & time >= "19:30" & time < "20:00" ~ "19:30-20:00",
+      group == 4 & time >= "20:00" & time < "20:30" ~ "20:00-20:30",
+      group == 4 & time >= "20:30" & time < "21:00" ~ "20:30-21:00",
+      group == 4 & time >= "21:00" & time < "21:30" ~ "21:00-21:30",
+      group == 4 & time >= "21:30" & time < "22:00" ~ "21:30-22:00",
+      group == 4 & time >= "22:00" & time <= "22:30" ~ "22:00-22:30",
+      
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  group_by(id, session, time_block) %>%
+  mutate(DPG_30min = mean(DPG, na.rm = TRUE)) %>%
+  ungroup()
+```
+
+# Create interactive table with 30-minute block means for DPG
+
+```{r dpg-30min-table}
+ibuttons %>%
+  group_by(id, session, time_block) %>%
+  slice(1) %>%
+  ungroup() %>%
+  select(id, session, time_block, DPG_30min) %>%
+  filter(!is.na(time_block)) %>%
+  arrange(id, session, time_block) %>%
+  datatable(
+    filter = 'top',
+    options = list(
+      pageLength = 50,
+      order = list(list(0, 'asc'), list(1, 'asc'), list(2, 'asc')),
+      scrollX = TRUE
+    ),
+    rownames = FALSE,
+    caption = "Distal-Proximal Gradient (DPG) - 30-Minute Block Means per Participant and Session"
+  ) %>%
+  formatRound('DPG_30min', 2)
+```
+
+# DPG Visualization - 30-minute block means per participant and session
+
+```{r dpg-visualization-setup}
+#| label: dpg-visualization-setup
+
+# Define participant information for light exposure patterns
+participant_info <- list(
+  P01 = list(hbt = 0, light_pattern = c("D", "D", "D", "B", "B", "B", "D", "D", "B", "D", "B"), group = 1),
+  P02 = list(hbt = 0, light_pattern = c("D", "D", "D", "B", "B", "B", "D", "D", "B", "D", "B"), group = 1),
+  P03 = list(hbt = 0, light_pattern = c("D", "D", "D", "B", "B", "B", "D", "D", "B", "D", "B"), group = 1),
+  P04 = list(hbt = 22, light_pattern = c("D", "B", "B", "B", "D", "D", "D", "B", "D", "B"), group = 2),
+  P05 = list(hbt = 22, light_pattern = c("D", "B", "B", "B", "D", "D", "D", "B", "D", "B"), group = 2),
+  P06 = list(hbt = 23.5, light_pattern = c("D", "B", "B", "B", "D", "D", "D", "B", "D", "B"), group = 3),
+  P07 = list(hbt = 23.5, light_pattern = c("D", "B", "B", "B", "D", "D", "D", "B", "D", "B"), group = 3),
+  P09 = list(hbt = 23.5, light_pattern = c("D", "B", "B", "B", "D", "D", "D", "B", "D", "B"), group = 3),
+  P10 = list(hbt = 23, light_pattern = c("D", "D", "D", "B", NA, "D", "B", "B", "B", "D", "B", "D", "D"), group = 4)
+)
+
+# Function to create DPG plot for one participant
+create_dpg_plot <- function(participant_id, info) {
+  
+  # Prepare data
+  dpg_plot <- ibuttons %>%
+    filter(id == participant_id) %>%
+    filter(!(participant_id == "P10" & session == "C04_05")) %>%
+    mutate(
+      session_num = as.numeric(gsub("C0[1-4]_", "", session))
+    ) %>%
+    mutate(
+      light_condition = info$light_pattern[session_num]
+    ) %>%
+    group_by(session_num, time_block) %>%
+    slice(1) %>%
+    ungroup() %>%
+    mutate(
+      start_hour = as.numeric(substr(time_block, 1, 2)),
+      start_min = as.numeric(substr(time_block, 4, 5)),
+      time_decimal_mid = start_hour + start_min/60 + 0.25,
+      hours_before_hbt = case_when(
+        info$hbt == 0 ~ 24 - time_decimal_mid,
+        info$hbt == 22 ~ ifelse(time_decimal_mid >= 16.5, 22 - time_decimal_mid, NA_real_),
+        info$hbt == 23 ~ ifelse(time_decimal_mid >= 17.5, 23 - time_decimal_mid, NA_real_),
+        info$hbt == 23.5 ~ ifelse(time_decimal_mid >= 18, 23.5 - time_decimal_mid, NA_real_),
+        TRUE ~ NA_real_
+      )
+    ) %>%
+    filter(hours_before_hbt >= 0.5 & hours_before_hbt <= 5.5) %>%
+    arrange(session_num, hours_before_hbt)
+  
+  if(nrow(dpg_plot) == 0) {
+    warning(paste("No data available for", participant_id))
+    return(NULL)
+  }
+  
+  # Determine y-axis limits
+  y_min <- floor(min(dpg_plot$DPG_30min, na.rm = TRUE) * 10) / 10 - 0.1
+  y_max <- ceiling(max(dpg_plot$DPG_30min, na.rm = TRUE) * 10) / 10 + 0.1
+  
+  # X-axis labels with HBT times (odd blocks only)
+  x_labels <- c(
+    "B1\n(5.25h)", "B2", "B3\n(4.25h)", "B4", "B5\n(3.25h)",
+    "B6", "B7\n(2.25h)", "B8", "B9\n(1.25h)", "B10"
+  )
+  
+  # Create plot
+  p <- ggplot(dpg_plot, aes(x = hours_before_hbt, y = DPG_30min)) +
+    
+    # Only yellow background for B evenings, no background for D evenings
+    geom_rect(data = subset(dpg_plot, light_condition == "B") %>%
+                group_by(session_num) %>% slice(1) %>% ungroup(),
+              aes(xmin = 2.5, xmax = 1, ymin = -Inf, ymax = Inf),
+              fill = "#FFF9E6", alpha = 0.8, inherit.aes = FALSE) +
+    
+    geom_line(color = "black", linewidth = 0.8) +
+    geom_point(color = "black", size = 2.5) +
+    
+    scale_x_reverse(
+      breaks = c(5.25, 4.75, 4.25, 3.75, 3.25, 2.75, 2.25, 1.75, 1.25, 0.75),
+      labels = x_labels,
+      limits = c(5.5, 0.5),
+      expand = c(0, 0)
+    ) +
+    scale_y_continuous(
+      limits = c(y_min, y_max),
+      expand = expansion(mult = c(0.05, 0.05))
+    ) +
+    
+    facet_wrap(~ session_num, ncol = 4,
+               labeller = labeller(session_num = function(x) {
+                 sapply(x, function(session) {
+                   session_num <- as.numeric(session)
+                   light_label <- if(session_num <= length(info$light_pattern) &&
+                                    !is.na(info$light_pattern[session_num])) {
+                     info$light_pattern[session_num]
+                   } else {
+                     "?"
+                   }
+                   paste0("Evening ", session, " (", light_label, ")")
+                 })
+               })) +
+    
+    labs(
+      title = paste0("Distal-proximal skin temperature gradient per evening (", participant_id, ")"),
+      x = "Block number (hours before HBT)",
+      y = "DPG [°C]"
+    ) +
+    
+    theme_classic(base_size = 11) +
+    theme(
+      aspect.ratio = 1,
+      plot.title = element_text(size = 15, hjust = 0, face = "plain", margin = margin(b = 10)),
+      axis.text = element_text(color = "black", size = 10),
+      axis.text.x = element_text(size = 7),
+      axis.title = element_text(size = 11),
+      axis.line = element_line(linewidth = 0.5),
+      axis.ticks = element_line(linewidth = 0.5),
+      panel.grid = element_blank(),
+      strip.background = element_rect(fill = "white", color = "grey80", linewidth = 0.5),
+      strip.text = element_text(size = 10, color = "black"),
+      panel.background = element_rect(fill = "white", color = "grey80", linewidth = 0.5),
+      plot.margin = margin(10, 10, 10, 10),
+      legend.position = "none"
+    )
+  
+  return(p)
+}
+```
+
+# DPG Plots for All Participants
+
+```{r dpg-plots-all-participants, fig.width=12, fig.height=9}
+#| label: fig-dpg-all-participants
+#| fig-cap: "Distal-Proximal Gradient (DPG) per evening - all participants"
+#| fig-width: 12
+#| fig-height: 9
+
+for (pid in names(participant_info)) {
+  plot <- create_dpg_plot(pid, participant_info[[pid]])
+  if (!is.null(plot)) {
+    print(plot)
+  }
+}
+```
+
+# Calculate DPG_entire and DPG_intervention from cleaned minute-level DPG values
+
+DPG_entire = mean of DPG values for entire 5h spent in the controlled climate chamber DPG_intervention = mean of DPG values for light intervention time window
+
+```{r dpg-calculate-windows-from-raw}
+ibuttons <- ibuttons %>%
+  mutate(
+    time = paste0(substr(timestamp, 10, 11), ":", substr(timestamp, 12, 13)),
+    
+    # Calculate hours before HBT per group
+    start_hour = as.numeric(substr(timestamp, 10, 11)),
+    start_min = as.numeric(substr(timestamp, 12, 13)),
+    time_decimal = start_hour + start_min/60,
+    
+    hours_before_hbt = case_when(
+      # Group 1: HBT = 00:00 (midnight)
+      group == 1 ~ 24 - time_decimal,
+      # Group 2: HBT = 22:00
+      group == 2 ~ ifelse(time_decimal >= 16.5, 22 - time_decimal, NA_real_),
+      # Group 3: HBT = 23:30
+      group == 3 ~ ifelse(time_decimal >= 18, 23.5 - time_decimal, NA_real_),
+      # Group 4: HBT = 23:00
+      group == 4 ~ ifelse(time_decimal >= 17.5, 23 - time_decimal, NA_real_),
+      TRUE ~ NA_real_
+    ),
+    
+    # Define windows based on hours before HBT
+    in_entire_window = (hours_before_hbt >= 0.5 & hours_before_hbt <= 5.5),
+    in_intervention_window = (hours_before_hbt >= 1.0 & hours_before_hbt <= 2.5)
+  ) %>%
+  # Calculate means per session from minute-level DPG values 
+  group_by(id, session) %>%
+  mutate(
+    DPG_entire = mean(DPG[in_entire_window], na.rm = TRUE),
+    DPG_intervention = mean(DPG[in_intervention_window], na.rm = TRUE)
+  ) %>%
+  ungroup() %>%
+  # Remove helper variables
+  select(-start_hour, -start_min, -time_decimal, -hours_before_hbt, 
+         -in_entire_window, -in_intervention_window)
+```
+
+```{r dpg-windows-table-from-raw}
+# Create interactive table
+ibuttons %>%
+  group_by(id, session) %>%
+  slice(1) %>%
+  ungroup() %>%
+  select(id, session, group, DPG_entire, DPG_intervention) %>%
+  arrange(id, session) %>%
+  datatable(
+    filter = 'top',
+    options = list(
+      pageLength = 25,
+      order = list(list(0, 'asc'), list(1, 'asc')),
+      scrollX = TRUE
+    ),
+    rownames = FALSE,
+    caption = "Distal-Proximal Gradient (DPG) - Entire 5h Window and Intervention Window (1.5h) Means per Participant and Session (calculated from minute-level cleaned data)"
+  ) %>%
+  formatRound(c('DPG_entire', 'DPG_intervention'), 2)
+```
+
+# DPG Descriptive Statistics 
+
+```{r}
+# DPG Descriptive Statistics 
+# Define light patterns
+light_patterns <- list(
+  P01 = strsplit("DDDBBBDDBDB", "")[[1]],
+  P02 = strsplit("DDDBBBDDBDB", "")[[1]],
+  P03 = strsplit("DDDBBBDDBDB", "")[[1]],
+  P04 = strsplit("DBBBDDDBDB", "")[[1]],
+  P05 = strsplit("DBBBDDDBDB", "")[[1]],
+  P06 = strsplit("DBBBDDDBDB", "")[[1]],
+  P09 = strsplit("DBBBDDDBDB", "")[[1]],
+  P10 = strsplit("DDDBXDBBBDBDD", "")[[1]]
+)
+
+# Add light condition to data
+dpg_data <- ibuttons %>%
+  filter(id != "P07") %>%
+  mutate(
+    session_num = as.numeric(sub("C\\d+_(\\d+)", "\\1", session)),
+    light_condition = sapply(1:n(), function(i) light_patterns[[id[i]]][session_num[i]])
+  )
+
+# Aggregate to session level first
+dpg_sessions <- dpg_data %>%
+  filter(light_condition != "X") %>%  # Exclude P10 session 5
+  group_by(id, session, light_condition) %>%
+  slice(1) %>%  # Take one row per session
+  ungroup()
+
+# Calculate mean ± SD by light condition
+dpg_summary <- dpg_sessions %>%
+  group_by(light_condition) %>%
+  summarise(
+    DPG_entire = sprintf("%.2f ± %.2f", 
+                         mean(DPG_entire, na.rm = TRUE), 
+                         sd(DPG_entire, na.rm = TRUE)),
+    DPG_intervention = sprintf("%.2f ± %.2f", 
+                               mean(DPG_intervention, na.rm = TRUE), 
+                               sd(DPG_intervention, na.rm = TRUE)),
+    n_sessions = n()
+  )
+
+print(dpg_summary)
+```
+
+# DPG Doublet Analysis - 5h Exposure Window
+
+```{r dpg-doublet-setup}
+# Define light patterns for groups to make sure they are available
+light_g1 <- unlist(strsplit("DDDBBBDDBDB", ""))
+light_g2 <- unlist(strsplit("DBBBDDDBDB", ""))
+light_g4_orig <- unlist(strsplit("DDDBXDBBBDBDD", ""))
+
+# Create doublet dataframes
+df_doublets_g1 <- data.frame(
+  session_start = 1:(length(light_g1) - 1),
+  session_end = 2:length(light_g1),
+  doublet = paste0(light_g1[-length(light_g1)], light_g1[-1])
+)
+
+df_doublets_g2 <- data.frame(
+  session_start = 1:(length(light_g2) - 1),
+  session_end = 2:length(light_g2),
+  doublet = paste0(light_g2[-length(light_g2)], light_g2[-1])
+)
+
+df_doublets_g4_orig <- data.frame(
+  session_start = 1:(length(light_g4_orig) - 1),
+  session_end = 2:length(light_g4_orig),
+  doublet = paste0(light_g4_orig[-length(light_g4_orig)], light_g4_orig[-1])
+)
+
+# Filter out doublets containing X (excluded session)
+df_doublets_g4 <- df_doublets_g4_orig %>% 
+  filter(!str_detect(doublet, "X"))
+```
+
+```{r dpg-doublet-calculate-5h}
+# Calculate doublet DPG for all participants - entire 5h window
+participants <- c("P01", "P02", "P03", "P04", "P05", "P06", "P07", "P09", "P10")
+doublets <- c("DD", "DB", "BD", "BB")
+
+df_plot_dpg <- data.frame(
+  doublet = character(),
+  participant = character(),
+  mean_dpg = numeric(),
+  stringsAsFactors = FALSE
+)
+
+for(p in participants) {
+  # Select appropriate doublet mapping
+  if(p %in% c("P01", "P02", "P03")) {
+    df_doublets <- df_doublets_g1
+  } else if(p %in% c("P04", "P05", "P06", "P07", "P09")) {
+    df_doublets <- df_doublets_g2
+  } else {
+    df_doublets <- df_doublets_g4
+  }
+  
+  # Get DPG data (one row per session with DPG_entire)
+  dpg_data <- ibuttons %>%
+    filter(id == p) %>%
+    # Exclude P10 session 5
+    filter(!(p == "P10" & session == "C04_05")) %>%
+    group_by(session) %>%
+    slice(1) %>%
+    ungroup() %>%
+    mutate(exp_session = as.numeric(gsub("C0[1-4]_", "", session))) %>%
+    select(exp_session, DPG_entire)
+  
+  # Join with doublets
+  dpg_doublets <- df_doublets %>%
+    rename(exp_session = session_end) %>%
+    left_join(dpg_data, by = "exp_session")
+  
+  # Calculate mean per doublet
+  mean_dpg_doublets <- dpg_doublets %>%
+    group_by(doublet) %>%
+    summarise(mean_dpg = mean(DPG_entire, na.rm = TRUE), .groups = "drop")
+  
+  # Add to plot data
+  for(d in doublets) {
+    if(d %in% mean_dpg_doublets$doublet) {
+      df_plot_dpg <- rbind(df_plot_dpg, data.frame(
+        doublet = d,
+        participant = p,
+        mean_dpg = mean_dpg_doublets$mean_dpg[mean_dpg_doublets$doublet == d]
+      ))
+    }
+  }
+}
+
+df_plot_dpg$doublet <- factor(df_plot_dpg$doublet, levels = c("DD", "BD", "DB", "BB"))
+```
+
+```{r dpg-doublet-plot-5h}
+#| label: fig-doublet-box-dpg-5h
+#| fig-cap: "Mean DPG per doublet type (5-h exposure, P07 excluded)"
+#| fig-width: 10
+#| fig-height: 8
+
+# Labels with bold second letter
+doublet_labels <- c(
+  "DD" = expression("D"*bold("D")),
+  "BD" = expression("B"*bold("D")),
+  "DB" = expression("D"*bold("B")),
+  "BB" = expression("B"*bold("B"))
+)
+
+# Colors based on second letter
+doublet_colors <- c(
+  "DD" = "#4A90E2", "BD" = "#4A90E2",
+  "DB" = "#F5A623", "BB" = "#F5A623"
+)
+
+# Exclude P07
+df_plot_dpg_noP07 <- df_plot_dpg %>% filter(participant != "P07")
+
+ggplot(df_plot_dpg_noP07, aes(x = doublet, y = mean_dpg)) +
+  geom_boxplot(aes(fill = doublet), outlier.shape = NA, width = 0.6, linewidth = 0.5) +
+  geom_point(position = position_jitter(width = 0.15, seed = 42),
+             size = 2.5, alpha = 0.7, shape = 16) +
+  scale_fill_manual(values = doublet_colors) +
+  scale_x_discrete(labels = doublet_labels) +
+  labs(
+    title = "Distal-proximal gradient under light exposure doublets",
+    subtitle = "Mean second-day DPG per doublet type (5-h exposure; P07 excluded)",
+    x = "Doublet",
+    y = "Mean Distal-Proximal Gradient (°C)"
+  ) +
+  theme_classic(base_size = 14) +
+  theme(
+    aspect.ratio = 1,
+    plot.title = element_text(size = 16, hjust = 0),
+    plot.subtitle = element_text(size = 13, hjust = 0, margin = margin(b = 10)),
+    axis.text = element_text(color = "black", size = 13),
+    axis.title = element_text(size = 14),
+    panel.grid.major.y = element_line(color = "grey90", linewidth = 0.3),
+    legend.position = "none"
+  )
+```
+
+```{r dpg-doublet-table-5h}
+# Create detailed overview table
+doublet_overview_dpg <- df_plot_dpg_noP07 %>%
+  arrange(doublet, participant) %>%
+  select(participant, doublet, mean_dpg)
+
+DT::datatable(
+  doublet_overview_dpg,
+  options = list(
+    pageLength = 20,
+    scrollX = TRUE,
+    order = list(list(1, 'asc'), list(0, 'asc'))
+  ),
+  caption = "Individual doublet observations for DPG (5-h exposure, P07 excluded)",
+  rownames = FALSE
+) %>%
+  DT::formatRound(columns = 'mean_dpg', digits = 2) %>%
+  DT::formatStyle(
+    'doublet',
+    backgroundColor = DT::styleEqual(
+      c('DD', 'BD', 'DB', 'BB'),
+      c('#e3f2fd', '#e3f2fd', '#fff3e0', '#fff3e0')
+    )
+  )
+```
+
+# DPG Doublet Analysis - 1.5h Intervention Window
+
+```{r dpg-doublet-calculate-intervention}
+# Calculate doublet DPG for all participants - intervention window (1.5h)
+participants_int <- c("P01", "P02", "P03", "P04", "P05", "P06", "P09", "P10")
+doublets <- c("DD", "DB", "BD", "BB")
+
+df_plot_dpg_int <- data.frame(
+  doublet = character(),
+  participant = character(),
+  mean_dpg_int = numeric(),
+  stringsAsFactors = FALSE
+)
+
+for(p in participants_int) {
+  # Select appropriate doublet mapping
+  if(p %in% c("P01", "P02", "P03")) {
+    df_doublets <- df_doublets_g1
+  } else if(p %in% c("P04", "P05", "P06", "P09")) {
+    df_doublets <- df_doublets_g2
+  } else {
+    df_doublets <- df_doublets_g4
+  }
+  
+  # Get DPG intervention data (one row per session with DPG_intervention)
+  dpg_data_int <- ibuttons %>%
+    filter(id == p) %>%
+    # Exclude P10 session 5
+    filter(!(p == "P10" & session == "C04_05")) %>%
+    group_by(session) %>%
+    slice(1) %>%
+    ungroup() %>%
+    mutate(exp_session = as.numeric(gsub("C0[1-4]_", "", session))) %>%
+    select(exp_session, DPG_intervention)
+  
+  # Join with doublets
+  dpg_doublets_int <- df_doublets %>%
+    rename(exp_session = session_end) %>%
+    left_join(dpg_data_int, by = "exp_session")
+  
+  # Calculate mean per doublet
+  mean_dpg_doublets_int <- dpg_doublets_int %>%
+    group_by(doublet) %>%
+    summarise(mean_dpg_int = mean(DPG_intervention, na.rm = TRUE), .groups = "drop")
+  
+  # Add to plot data
+  for(d in doublets) {
+    if(d %in% mean_dpg_doublets_int$doublet) {
+      df_plot_dpg_int <- rbind(df_plot_dpg_int, data.frame(
+        doublet = d,
+        participant = p,
+        mean_dpg_int = mean_dpg_doublets_int$mean_dpg_int[mean_dpg_doublets_int$doublet == d]
+      ))
+    }
+  }
+}
+
+df_plot_dpg_int$doublet <- factor(df_plot_dpg_int$doublet, levels = c("DD", "BD", "DB", "BB"))
+```
+
+```{r dpg-doublet-plot-intervention}
+#| label: fig-doublet-box-dpg-1.5h
+#| fig-cap: "Mean DPG per doublet type (1.5-h intervention, P07 excluded)"
+#| fig-width: 10
+#| fig-height: 8
+
+# Labels with bold second letter
+doublet_labels <- c(
+  "DD" = expression("D"*bold("D")),
+  "BD" = expression("B"*bold("D")),
+  "DB" = expression("D"*bold("B")),
+  "BB" = expression("B"*bold("B"))
+)
+
+# Colors based on second letter
+doublet_colors <- c(
+  "DD" = "#4A90E2", "BD" = "#4A90E2",
+  "DB" = "#F5A623", "BB" = "#F5A623"
+)
+
+# Exclude P07
+df_plot_dpg_int_noP07 <- df_plot_dpg_int %>% filter(participant != "P07")
+
+ggplot(df_plot_dpg_int_noP07, aes(x = doublet, y = mean_dpg_int)) +
+  geom_boxplot(aes(fill = doublet), outlier.shape = NA, width = 0.6, linewidth = 0.5) +
+  geom_point(position = position_jitter(width = 0.15, seed = 42),
+             size = 2.5, alpha = 0.7, shape = 16) +
+  scale_fill_manual(values = doublet_colors) +
+  scale_x_discrete(labels = doublet_labels) +
+  labs(
+    title = "Distal-proximal gradient under light exposure doublets",
+    subtitle = "Mean second-day DPG per doublet type (1.5-h intervention window; P07 excluded)",
+    x = "Doublet",
+    y = "Mean Distal-Proximal Gradient (°C)"
+  ) +
+  theme_classic(base_size = 14) +
+  theme(
+    aspect.ratio = 1,
+    plot.title = element_text(size = 16, hjust = 0),
+    plot.subtitle = element_text(size = 13, hjust = 0, margin = margin(b = 10)),
+    axis.text = element_text(color = "black", size = 13),
+    axis.title = element_text(size = 14),
+    panel.grid.major.y = element_line(color = "grey90", linewidth = 0.3),
+    legend.position = "none"
+  )
+```
+
+```{r dpg-doublet-table-intervention}
+# Create detailed overview table
+doublet_overview_dpg_int <- df_plot_dpg_int_noP07 %>%
+  arrange(doublet, participant) %>%
+  select(participant, doublet, mean_dpg_int)
+
+DT::datatable(
+  doublet_overview_dpg_int,
+  options = list(
+    pageLength = 20,
+    scrollX = TRUE,
+    order = list(list(1, 'asc'), list(0, 'asc'))
+  ),
+  caption = "Individual doublet observations for DPG (1.5-h intervention window, P07 excluded)",
+  rownames = FALSE
+) %>%
+  DT::formatRound(columns = 'mean_dpg_int', digits = 2) %>%
+  DT::formatStyle(
+    'doublet',
+    backgroundColor = DT::styleEqual(
+      c('DD', 'BD', 'DB', 'BB'),
+      c('#e3f2fd', '#e3f2fd', '#fff3e0', '#fff3e0')
+    )
+  )
+```
+
+# DPG Doublet Position Analysis - 5h Exposure Window with Standard Error Bars
+
+```{r dpg-doublet-position-setup}
+# Create doublet position mappings
+doublet_positions_g1 <- df_doublets_g1 %>%
+  group_by(doublet) %>%
+  summarise(
+    position1_sessions = list(session_start),
+    position2_sessions = list(session_end),
+    .groups = "drop"
+  )
+
+doublet_positions_g2 <- df_doublets_g2 %>%
+  group_by(doublet) %>%
+  summarise(
+    position1_sessions = list(session_start),
+    position2_sessions = list(session_end),
+    .groups = "drop"
+  )
+
+doublet_positions_g4 <- df_doublets_g4 %>%
+  group_by(doublet) %>%
+  summarise(
+    position1_sessions = list(session_start),
+    position2_sessions = list(session_end),
+    .groups = "drop"
+  )
+
+# Function to calculate doublet positions for DPG (entire window)
+calc_doublet_positions_dpg <- function(participant_id, dpg_data, doublet_map) {
+  results <- doublet_map %>%
+    rowwise() %>%
+    mutate(
+      pos1_dpg = mean(dpg_data$DPG_entire[dpg_data$exp_session %in% position1_sessions], 
+                      na.rm = TRUE),
+      pos2_dpg = mean(dpg_data$DPG_entire[dpg_data$exp_session %in% position2_sessions], 
+                      na.rm = TRUE),
+      participant = participant_id
+    ) %>%
+    ungroup() %>%
+    select(participant, doublet, pos1_dpg, pos2_dpg)
+  
+  return(results)
+}
+```
+
+```{r dpg-doublet-position-calculate-5h}
+# Calculate position data for all participants (excluding P07) - 5h window
+participants_noP07 <- c("P01", "P02", "P03", "P04", "P05", "P06", "P09", "P10")
+doublets <- c("DD", "DB", "BD", "BB")
+
+mean_doublet_pos_dpg_noP07 <- data.frame(
+  doublet = character(),
+  position = character(),
+  mean_dpg = numeric(),
+  sd_dpg = numeric(),
+  se_dpg = numeric(),
+  n_participants = integer(),
+  stringsAsFactors = FALSE
+)
+
+for(d in doublets) {
+  for(pos in c("pos1", "pos2")) {
+    values <- c()
+    for(p in participants_noP07) {
+      # Select mapping
+      if(p %in% c("P01", "P02", "P03")) {
+        doublet_map <- doublet_positions_g1
+      } else if(p %in% c("P04", "P05", "P06", "P09")) {
+        doublet_map <- doublet_positions_g2
+      } else {
+        doublet_map <- doublet_positions_g4
+      }
+      
+      # Get DPG data
+      dpg_data <- ibuttons %>%
+        filter(id == p) %>%
+        filter(!(p == "P10" & session == "C04_05")) %>%
+        group_by(session) %>%
+        slice(1) %>%
+        ungroup() %>%
+        mutate(exp_session = as.numeric(gsub("C0[1-4]_", "", session))) %>%
+        select(exp_session, DPG_entire)
+      
+      # Calculate positions
+      pos_dpg <- calc_doublet_positions_dpg(p, dpg_data, doublet_map)
+      
+      # Extract value
+      if(d %in% pos_dpg$doublet) {
+        if(pos == "pos1") {
+          values <- c(values, pos_dpg$pos1_dpg[pos_dpg$doublet == d])
+        } else {
+          values <- c(values, pos_dpg$pos2_dpg[pos_dpg$doublet == d])
+        }
+      }
+    }
+    
+    if(length(values) > 0) {
+      n <- length(values)
+      mean_doublet_pos_dpg_noP07 <- rbind(mean_doublet_pos_dpg_noP07, data.frame(
+        doublet = d,
+        position = pos,
+        mean_dpg = mean(values, na.rm = TRUE),
+        sd_dpg = sd(values, na.rm = TRUE),
+        se_dpg = sd(values, na.rm = TRUE) / sqrt(n),  # Standard Error
+        n_participants = n
+      ))
+    }
+  }
+}
+
+# Prepare for plotting
+df_plot_positions_dpg_noP07 <- mean_doublet_pos_dpg_noP07 %>%
+  mutate(
+    position_label = ifelse(position == "pos1", "Position 1", "Position 2"),
+    position_num = ifelse(position == "pos1", 1, 2),
+    light_type = ifelse(position == "pos1", 
+                        substr(doublet, 1, 1),
+                        substr(doublet, 2, 2)),
+    light_label = ifelse(light_type == "D", "dim", "bright")
+  ) %>%
+  mutate(doublet = factor(doublet, levels = c("DD", "BD", "DB", "BB")))
+```
+
+```{r dpg-doublet-position-with-error-panel}
+# Define color scheme
+light_colors <- c("dim" = "#4A90E2", "bright" = "#F5A623")
+
+# Main plot without error bars
+p_main <- ggplot(df_plot_positions_dpg_noP07, 
+                 aes(x = position_num, y = mean_dpg, group = doublet)) +
+  geom_line(color = "grey60", linewidth = 0.6, alpha = 0.7) +
+  geom_point(aes(color = light_label), size = 5, shape = 16) +
+  scale_color_manual(values = light_colors,
+                     labels = c("dim" = "Dim (10 lx)", "bright" = "Bright (1000 lx)")) +
+  scale_x_continuous(breaks = c(1, 2), 
+                     labels = c("Position 1", "Position 2"),
+                     limits = c(0.8, 2.2)) +
+  labs(
+    title = "Distal-proximal gradient across light exposure doublets",
+    subtitle = "Mean DPG across all participants (5-h exposure; P07 excluded)",
+    x = "Doublet position",
+    y = "Mean Distal-Proximal Gradient (°C)",
+    color = "Light condition"
+  ) +
+  theme_classic(base_size = 14) +
+  theme(
+    aspect.ratio = 1,
+    plot.title = element_text(size = 16, hjust = 0),
+    plot.subtitle = element_text(size = 13, hjust = 0, margin = margin(b = 10)),
+    axis.text = element_text(color = "black", size = 13),
+    axis.title = element_text(size = 14),
+    panel.grid.major.y = element_line(color = "grey90", linewidth = 0.3),
+    legend.position = "right"
+  )
+
+# Error Bar Panel (right)
+p_error <- ggplot(df_plot_positions_dpg_noP07, 
+                  aes(x = doublet, y = mean_dpg, color = light_label)) +
+  geom_errorbar(aes(ymin = mean_dpg - se_dpg, ymax = mean_dpg + se_dpg),
+                width = 0.3, linewidth = 0.8) +
+  geom_point(size = 3, shape = 16) +
+  facet_wrap(~ position_label, ncol = 1, scales = "free_y") +
+  scale_color_manual(values = light_colors) +
+  labs(
+    title = "SE per Doublet",
+    y = NULL,
+    x = "Doublet"
+  ) +
+  theme_classic(base_size = 11) +
+  theme(
+    aspect.ratio = 2,
+    plot.title = element_text(size = 12, hjust = 0.5, face = "bold"),
+    axis.text.x = element_text(size = 9, angle = 0),
+    axis.text.y = element_text(size = 9),
+    strip.text = element_text(size = 10, face = "bold"),
+    strip.background = element_rect(fill = "grey90"),
+    legend.position = "none",
+    panel.grid.major.y = element_line(color = "grey90", linewidth = 0.3)
+  )
+
+# Combine both plots
+p_main + p_error + plot_layout(widths = c(3, 1))
+```
+
+# DPG Doublet Position Analysis - 1.5h Intervention Window with Standard Error Panel
+
+```{r dpg-doublet-position-intervention-function}
+# Function to calculate doublet positions for DPG (intervention window)
+calc_doublet_positions_dpg_int <- function(participant_id, dpg_data_int, doublet_map) {
+  results <- doublet_map %>%
+    rowwise() %>%
+    mutate(
+      pos1_dpg_int = mean(dpg_data_int$DPG_intervention[dpg_data_int$exp_session %in% position1_sessions], 
+                          na.rm = TRUE),
+      pos2_dpg_int = mean(dpg_data_int$DPG_intervention[dpg_data_int$exp_session %in% position2_sessions], 
+                          na.rm = TRUE),
+      participant = participant_id
+    ) %>%
+    ungroup() %>%
+    select(participant, doublet, pos1_dpg_int, pos2_dpg_int)
+  
+  return(results)
+}
+```
+
+```{r dpg-doublet-position-calculate-intervention}
+# Calculate position data for all participants (excluding P07) - intervention window
+participants_noP07 <- c("P01", "P02", "P03", "P04", "P05", "P06", "P09", "P10")
+doublets <- c("DD", "DB", "BD", "BB")
+
+mean_doublet_pos_dpg_int_noP07 <- data.frame(
+  doublet = character(),
+  position = character(),
+  mean_dpg_int = numeric(),
+  sd_dpg_int = numeric(),
+  se_dpg_int = numeric(),
+  n_participants = integer(),
+  stringsAsFactors = FALSE
+)
+
+for(d in doublets) {
+  for(pos in c("pos1", "pos2")) {
+    values <- c()
+    for(p in participants_noP07) {
+      # Select mapping
+      if(p %in% c("P01", "P02", "P03")) {
+        doublet_map <- doublet_positions_g1
+      } else if(p %in% c("P04", "P05", "P06", "P09")) {
+        doublet_map <- doublet_positions_g2
+      } else {
+        doublet_map <- doublet_positions_g4
+      }
+      
+      # Get DPG intervention data
+      dpg_data_int <- ibuttons %>%
+        filter(id == p) %>%
+        filter(!(p == "P10" & session == "C04_05")) %>%
+        group_by(session) %>%
+        slice(1) %>%
+        ungroup() %>%
+        mutate(exp_session = as.numeric(gsub("C0[1-4]_", "", session))) %>%
+        select(exp_session, DPG_intervention)
+      
+      # Calculate positions
+      pos_dpg_int <- calc_doublet_positions_dpg_int(p, dpg_data_int, doublet_map)
+      
+      # Extract value
+      if(d %in% pos_dpg_int$doublet) {
+        if(pos == "pos1") {
+          values <- c(values, pos_dpg_int$pos1_dpg_int[pos_dpg_int$doublet == d])
+        } else {
+          values <- c(values, pos_dpg_int$pos2_dpg_int[pos_dpg_int$doublet == d])
+        }
+      }
+    }
+    
+    if(length(values) > 0) {
+      n <- length(values)
+      mean_doublet_pos_dpg_int_noP07 <- rbind(mean_doublet_pos_dpg_int_noP07, data.frame(
+        doublet = d,
+        position = pos,
+        mean_dpg_int = mean(values, na.rm = TRUE),
+        sd_dpg_int = sd(values, na.rm = TRUE),
+        se_dpg_int = sd(values, na.rm = TRUE) / sqrt(n),
+        n_participants = n
+      ))
+    }
+  }
+}
+
+# Prepare for plotting
+df_plot_positions_dpg_int_noP07 <- mean_doublet_pos_dpg_int_noP07 %>%
+  mutate(
+    position_label = ifelse(position == "pos1", "Position 1", "Position 2"),
+    position_num = ifelse(position == "pos1", 1, 2),
+    light_type = ifelse(position == "pos1", 
+                        substr(doublet, 1, 1),
+                        substr(doublet, 2, 2)),
+    light_label = ifelse(light_type == "D", "dim", "bright")
+  ) %>%
+  mutate(doublet = factor(doublet, levels = c("DD", "BD", "DB", "BB")))
+```
+
+```{r dpg-doublet-position-intervention-with-error-panel}
+# Define colors
+light_colors <- c("dim" = "#4A90E2", "bright" = "#F5A623")
+
+# Main plot without error bars
+p_main_int <- ggplot(df_plot_positions_dpg_int_noP07, 
+                     aes(x = position_num, y = mean_dpg_int, group = doublet)) +
+  geom_line(color = "grey60", linewidth = 0.6, alpha = 0.7) +
+  geom_point(aes(color = light_label), size = 5, shape = 16) +
+  scale_color_manual(values = light_colors,
+                     labels = c("dim" = "Dim (10 lx)", "bright" = "Bright (1000 lx)")) +
+  scale_x_continuous(breaks = c(1, 2), 
+                     labels = c("Position 1", "Position 2"),
+                     limits = c(0.8, 2.2)) +
+  labs(
+    title = "Distal-proximal gradient across light exposure doublets",
+    subtitle = "Mean DPG across all participants (1.5-h intervention window; P07 excluded)",
+    x = "Doublet position",
+    y = "Mean Distal-Proximal Gradient (°C)",
+    color = "Light condition"
+  ) +
+  theme_classic(base_size = 14) +
+  theme(
+    aspect.ratio = 1,
+    plot.title = element_text(size = 16, hjust = 0),
+    plot.subtitle = element_text(size = 13, hjust = 0, margin = margin(b = 10)),
+    axis.text = element_text(color = "black", size = 13),
+    axis.title = element_text(size = 14),
+    panel.grid.major.y = element_line(color = "grey90", linewidth = 0.3),
+    legend.position = "right"
+  )
+
+# Error bar panel (right)
+p_error_int <- ggplot(df_plot_positions_dpg_int_noP07, 
+                      aes(x = doublet, y = mean_dpg_int, color = light_label)) +
+  geom_errorbar(aes(ymin = mean_dpg_int - se_dpg_int, ymax = mean_dpg_int + se_dpg_int),
+                width = 0.3, linewidth = 0.8) +
+  geom_point(size = 3, shape = 16) +
+  facet_wrap(~ position_label, ncol = 1, scales = "free_y") +
+  scale_color_manual(values = light_colors) +
+  labs(
+    title = "SE per Doublet",
+    y = NULL,
+    x = "Doublet"
+  ) +
+  theme_classic(base_size = 11) +
+  theme(
+    aspect.ratio = 2,
+    plot.title = element_text(size = 12, hjust = 0.5, face = "bold"),
+    axis.text.x = element_text(size = 9, angle = 0),
+    axis.text.y = element_text(size = 9),
+    strip.text = element_text(size = 10, face = "bold"),
+    strip.background = element_rect(fill = "grey90"),
+    legend.position = "none",
+    panel.grid.major.y = element_line(color = "grey90", linewidth = 0.3)
+  )
+
+# Combine both plots
+p_main_int + p_error_int + plot_layout(widths = c(3, 1))
+```
+
+# DPG Triplet Analysis - 5h Exposure Window
+
+```{r dpg-triplet-setup}
+# Define light patterns for triplets to make sure they are avialable 
+light_g1 <- unlist(strsplit("DDDBBBDDBDB", ""))
+light_g2 <- unlist(strsplit("DBBBDDDBDB", ""))
+light_g4_orig <- unlist(strsplit("DDDBXDBBBDBDD", ""))
+
+# Create triplet dataframes
+df_triplets_g1 <- data.frame(
+  session_start = 1:(length(light_g1) - 2),
+  session_mid = 2:(length(light_g1) - 1),
+  session_end = 3:length(light_g1),
+  triplet = paste0(light_g1[1:(length(light_g1) - 2)], 
+                   light_g1[2:(length(light_g1) - 1)], 
+                   light_g1[3:length(light_g1)])
+)
+
+df_triplets_g2 <- data.frame(
+  session_start = 1:(length(light_g2) - 2),
+  session_mid = 2:(length(light_g2) - 1),
+  session_end = 3:length(light_g2),
+  triplet = paste0(light_g2[1:(length(light_g2) - 2)], 
+                   light_g2[2:(length(light_g2) - 1)], 
+                   light_g2[3:length(light_g2)])
+)
+
+df_triplets_g4_orig <- data.frame(
+  session_start = 1:(length(light_g4_orig) - 2),
+  session_mid = 2:(length(light_g4_orig) - 1),
+  session_end = 3:length(light_g4_orig),
+  triplet = paste0(light_g4_orig[1:(length(light_g4_orig) - 2)], 
+                   light_g4_orig[2:(length(light_g4_orig) - 1)], 
+                   light_g4_orig[3:length(light_g4_orig)])
+)
+
+# Filter out triplets containing X (excluded session 5 for P10)
+df_triplets_g4 <- df_triplets_g4_orig %>% 
+  filter(!str_detect(triplet, "X"))
+```
+
+```{r dpg-triplet-calculate-5h}
+# Calculate triplet DPG for all participants - entire 5h window
+participants <- c("P01", "P02", "P03", "P04", "P05", "P06", "P07", "P09", "P10")
+triplets <- c("DDD", "DDB", "DBD", "DBB", "BDD", "BDB", "BBD", "BBB")
+
+df_plot_dpg_triplet <- data.frame(
+  triplet = character(),
+  participant = character(),
+  mean_dpg = numeric(),
+  stringsAsFactors = FALSE
+)
+
+for(p in participants) {
+  # Select appropriate triplet mapping
+  if(p %in% c("P01", "P02", "P03")) {
+    df_triplets <- df_triplets_g1
+  } else if(p %in% c("P04", "P05", "P06", "P07", "P09")) {
+    df_triplets <- df_triplets_g2
+  } else {
+    df_triplets <- df_triplets_g4
+  }
+  
+  # Get DPG data
+  dpg_data <- ibuttons %>%
+    filter(id == p) %>%
+    filter(!(p == "P10" & session == "C04_05")) %>%
+    group_by(session) %>%
+    slice(1) %>%
+    ungroup() %>%
+    mutate(exp_session = as.numeric(gsub("C0[1-4]_", "", session))) %>%
+    select(exp_session, DPG_entire)
+  
+  # Join with triplets
+  dpg_triplets <- df_triplets %>%
+    rename(exp_session = session_end) %>%
+    left_join(dpg_data, by = "exp_session")
+  
+  # Calculate mean per triplet
+  mean_dpg_triplets <- dpg_triplets %>%
+    group_by(triplet) %>%
+    summarise(mean_dpg = mean(DPG_entire, na.rm = TRUE), .groups = "drop")
+  
+  # Add to plot data
+  for(t in triplets) {
+    if(t %in% mean_dpg_triplets$triplet) {
+      df_plot_dpg_triplet <- rbind(df_plot_dpg_triplet, data.frame(
+        triplet = t,
+        participant = p,
+        mean_dpg = mean_dpg_triplets$mean_dpg[mean_dpg_triplets$triplet == t]
+      ))
+    }
+  }
+}
+
+df_plot_dpg_triplet$triplet <- factor(df_plot_dpg_triplet$triplet, 
+                                      levels = c("DDD", "BDD", "DBD", "BBD", 
+                                                "DDB", "BDB", "DBB", "BBB"))
+```
+
+```{r dpg-triplet-plot-5h}
+#| label: fig-triplet-box-dpg-5h
+#| fig-cap: "Mean DPG per triplet type (5-h exposure, P07 excluded)"
+#| fig-width: 10
+#| fig-height: 8
+
+# Labels with bold third letter
+triplet_labels <- c(
+  "DDD" = expression("DD"*bold("D")),
+  "BDD" = expression("BD"*bold("D")),
+  "DBD" = expression("DB"*bold("D")),
+  "BBD" = expression("BB"*bold("D")),
+  "DDB" = expression("DD"*bold("B")),
+  "BDB" = expression("BD"*bold("B")),
+  "DBB" = expression("DB"*bold("B")),
+  "BBB" = expression("BB"*bold("B"))
+)
+
+# Colors based on third letter
+triplet_colors <- c(
+  "DDD" = "#4A90E2", "BDD" = "#4A90E2", "DBD" = "#4A90E2", "BBD" = "#4A90E2",
+  "DDB" = "#F5A623", "BDB" = "#F5A623", "DBB" = "#F5A623", "BBB" = "#F5A623"
+)
+
+# Exclude P07
+df_plot_dpg_triplet_noP07 <- df_plot_dpg_triplet %>% filter(participant != "P07")
+
+ggplot(df_plot_dpg_triplet_noP07, aes(x = triplet, y = mean_dpg)) +
+  geom_boxplot(aes(fill = triplet), outlier.shape = NA, width = 0.6, linewidth = 0.5) +
+  geom_point(position = position_jitter(width = 0.15, seed = 42),
+             size = 2.5, alpha = 0.7, shape = 16) +
+  scale_fill_manual(values = triplet_colors) +
+  scale_x_discrete(labels = triplet_labels) +
+  labs(
+    title = "Distal-proximal gradient under light exposure triplets",
+    subtitle = "Mean third-day DPG per triplet type (5-h exposure; P07 excluded)",
+    x = "Triplet",
+    y = "Mean Distal-Proximal Gradient (°C)"
+  ) +
+  theme_classic(base_size = 14) +
+  theme(
+    aspect.ratio = 1,
+    plot.title = element_text(size = 16, hjust = 0),
+    plot.subtitle = element_text(size = 13, hjust = 0, margin = margin(b = 10)),
+    axis.text = element_text(color = "black", size = 13),
+    axis.title = element_text(size = 14),
+    panel.grid.major.y = element_line(color = "grey90", linewidth = 0.3),
+    legend.position = "none"
+  )
+```
+
+```{r dpg-triplet-table-5h}
+# Create detailed overview table
+triplet_overview_dpg <- df_plot_dpg_triplet_noP07 %>%
+  arrange(triplet, participant) %>%
+  select(participant, triplet, mean_dpg)
+
+DT::datatable(
+  triplet_overview_dpg,
+  options = list(
+    pageLength = 20,
+    scrollX = TRUE,
+    order = list(list(1, 'asc'), list(0, 'asc'))
+  ),
+  caption = "Individual triplet observations for DPG (5-h exposure, P07 excluded)",
+  rownames = FALSE
+) %>%
+  DT::formatRound(columns = 'mean_dpg', digits = 2) %>%
+  DT::formatStyle(
+    'triplet',
+    backgroundColor = DT::styleEqual(
+      c('DDD', 'BDD', 'DBD', 'BBD', 'DDB', 'BDB', 'DBB', 'BBB'),
+      c('#e3f2fd', '#e3f2fd', '#e3f2fd', '#e3f2fd', 
+        '#fff3e0', '#fff3e0', '#fff3e0', '#fff3e0')
+    )
+  )
+```
+
+# DPG Triplet Analysis - 1.5h Intervention Window
+
+```{r dpg-triplet-calculate-intervention}
+# Calculate triplet DPG for all participants - intervention window (1.5h)
+participants_int <- c("P01", "P02", "P03", "P04", "P05", "P06", "P09", "P10")
+triplets <- c("DDD", "DDB", "DBD", "DBB", "BDD", "BDB", "BBD", "BBB")
+
+df_plot_dpg_triplet_int <- data.frame(
+  triplet = character(),
+  participant = character(),
+  mean_dpg_int = numeric(),
+  stringsAsFactors = FALSE
+)
+
+for(p in participants_int) {
+  # Select appropriate triplet mapping
+  if(p %in% c("P01", "P02", "P03")) {
+    df_triplets <- df_triplets_g1
+  } else if(p %in% c("P04", "P05", "P06", "P09")) {
+    df_triplets <- df_triplets_g2
+  } else {
+    df_triplets <- df_triplets_g4
+  }
+  
+  # Get DPG intervention data
+  dpg_data_int <- ibuttons %>%
+    filter(id == p) %>%
+    filter(!(p == "P10" & session == "C04_05")) %>%
+    group_by(session) %>%
+    slice(1) %>%
+    ungroup() %>%
+    mutate(exp_session = as.numeric(gsub("C0[1-4]_", "", session))) %>%
+    select(exp_session, DPG_intervention)
+  
+  # Join with triplets
+  dpg_triplets_int <- df_triplets %>%
+    rename(exp_session = session_end) %>%
+    left_join(dpg_data_int, by = "exp_session")
+  
+  # Calculate mean per triplet
+  mean_dpg_triplets_int <- dpg_triplets_int %>%
+    group_by(triplet) %>%
+    summarise(mean_dpg_int = mean(DPG_intervention, na.rm = TRUE), .groups = "drop")
+  
+  # Add to plot data
+  for(t in triplets) {
+    if(t %in% mean_dpg_triplets_int$triplet) {
+      df_plot_dpg_triplet_int <- rbind(df_plot_dpg_triplet_int, data.frame(
+        triplet = t,
+        participant = p,
+        mean_dpg_int = mean_dpg_triplets_int$mean_dpg_int[mean_dpg_triplets_int$triplet == t]
+      ))
+    }
+  }
+}
+
+df_plot_dpg_triplet_int$triplet <- factor(df_plot_dpg_triplet_int$triplet, 
+                                          levels = c("DDD", "BDD", "DBD", "BBD", 
+                                                    "DDB", "BDB", "DBB", "BBB"))
+```
+
+```{r dpg-triplet-plot-intervention}
+#| label: fig-triplet-box-dpg-1.5h
+#| fig-cap: "Mean DPG per triplet type (1.5-h intervention, P07 excluded)"
+#| fig-width: 10
+#| fig-height: 8
+
+# Labels with bold third letter
+triplet_labels <- c(
+  "DDD" = expression("DD"*bold("D")),
+  "BDD" = expression("BD"*bold("D")),
+  "DBD" = expression("DB"*bold("D")),
+  "BBD" = expression("BB"*bold("D")),
+  "DDB" = expression("DD"*bold("B")),
+  "BDB" = expression("BD"*bold("B")),
+  "DBB" = expression("DB"*bold("B")),
+  "BBB" = expression("BB"*bold("B"))
+)
+
+# Colors based on third letter
+triplet_colors <- c(
+  "DDD" = "#4A90E2", "BDD" = "#4A90E2", "DBD" = "#4A90E2", "BBD" = "#4A90E2",
+  "DDB" = "#F5A623", "BDB" = "#F5A623", "DBB" = "#F5A623", "BBB" = "#F5A623"
+)
+
+# Exclude P07
+df_plot_dpg_triplet_int_noP07 <- df_plot_dpg_triplet_int %>% filter(participant != "P07")
+
+ggplot(df_plot_dpg_triplet_int_noP07, aes(x = triplet, y = mean_dpg_int)) +
+  geom_boxplot(aes(fill = triplet), outlier.shape = NA, width = 0.6, linewidth = 0.5) +
+  geom_point(position = position_jitter(width = 0.15, seed = 42),
+             size = 2.5, alpha = 0.7, shape = 16) +
+  scale_fill_manual(values = triplet_colors) +
+  scale_x_discrete(labels = triplet_labels) +
+  labs(
+    title = "Distal-proximal gradient under light exposure triplets",
+    subtitle = "Mean third-day DPG per triplet type (1.5-h intervention window; P07 excluded)",
+    x = "Triplet",
+    y = "Mean Distal-Proximal Gradient (°C)"
+  ) +
+  theme_classic(base_size = 14) +
+  theme(
+    aspect.ratio = 1,
+    plot.title = element_text(size = 16, hjust = 0),
+    plot.subtitle = element_text(size = 13, hjust = 0, margin = margin(b = 10)),
+    axis.text = element_text(color = "black", size = 13),
+    axis.title = element_text(size = 14),
+    panel.grid.major.y = element_line(color = "grey90", linewidth = 0.3),
+    legend.position = "none"
+  )
+```
+
+```{r dpg-triplet-table-intervention}
+# Create detailed overview table
+triplet_overview_dpg_int <- df_plot_dpg_triplet_int_noP07 %>%
+  arrange(triplet, participant) %>%
+  select(participant, triplet, mean_dpg_int)
+
+DT::datatable(
+  triplet_overview_dpg_int,
+  options = list(
+    pageLength = 20,
+    scrollX = TRUE,
+    order = list(list(1, 'asc'), list(0, 'asc'))
+  ),
+  caption = "Individual triplet observations for DPG (1.5-h intervention window, P07 excluded)",
+  rownames = FALSE
+) %>%
+  DT::formatRound(columns = 'mean_dpg_int', digits = 2) %>%
+  DT::formatStyle(
+    'triplet',
+    backgroundColor = DT::styleEqual(
+      c('DDD', 'BDD', 'DBD', 'BBD', 'DDB', 'BDB', 'DBB', 'BBB'),
+      c('#e3f2fd', '#e3f2fd', '#e3f2fd', '#e3f2fd', 
+        '#fff3e0', '#fff3e0', '#fff3e0', '#fff3e0')
+    )
+  )
+```
+
+# DPG Triplet Position Analysis - 5h Exposure Window
+
+```{r dpg-triplet-position-setup}
+# Create triplet position mappings
+triplet_positions_g1 <- df_triplets_g1 %>%
+  group_by(triplet) %>%
+  summarise(
+    position1_sessions = list(session_start),
+    position2_sessions = list(session_mid),
+    position3_sessions = list(session_end),
+    .groups = "drop"
+  )
+
+triplet_positions_g2 <- df_triplets_g2 %>%
+  group_by(triplet) %>%
+  summarise(
+    position1_sessions = list(session_start),
+    position2_sessions = list(session_mid),
+    position3_sessions = list(session_end),
+    .groups = "drop"
+  )
+
+triplet_positions_g4 <- df_triplets_g4 %>%
+  group_by(triplet) %>%
+  summarise(
+    position1_sessions = list(session_start),
+    position2_sessions = list(session_mid),
+    position3_sessions = list(session_end),
+    .groups = "drop"
+  )
+
+# Function to calculate triplet positions for DPG (entire window)
+calc_triplet_positions_dpg <- function(participant_id, dpg_data, triplet_map) {
+  results <- triplet_map %>%
+    rowwise() %>%
+    mutate(
+      pos1_dpg = mean(dpg_data$DPG_entire[dpg_data$exp_session %in% position1_sessions], 
+                      na.rm = TRUE),
+      pos2_dpg = mean(dpg_data$DPG_entire[dpg_data$exp_session %in% position2_sessions], 
+                      na.rm = TRUE),
+      pos3_dpg = mean(dpg_data$DPG_entire[dpg_data$exp_session %in% position3_sessions], 
+                      na.rm = TRUE),
+      participant = participant_id
+    ) %>%
+    ungroup() %>%
+    select(participant, triplet, pos1_dpg, pos2_dpg, pos3_dpg)
+  
+  return(results)
+}
+
+# Function for intervention window
+calc_triplet_positions_dpg_int <- function(participant_id, dpg_data_int, triplet_map) {
+  results <- triplet_map %>% 
+    rowwise() %>%
+    mutate(
+      pos1_dpg_int = mean(dpg_data_int$DPG_intervention[dpg_data_int$exp_session %in% position1_sessions], 
+                          na.rm = TRUE),
+      pos2_dpg_int = mean(dpg_data_int$DPG_intervention[dpg_data_int$exp_session %in% position2_sessions], 
+                          na.rm = TRUE),
+      pos3_dpg_int = mean(dpg_data_int$DPG_intervention[dpg_data_int$exp_session %in% position3_sessions], 
+                          na.rm = TRUE),
+      participant = participant_id
+    ) %>%
+    ungroup() %>%
+    select(participant, triplet, pos1_dpg_int, pos2_dpg_int, pos3_dpg_int)
+  
+  return(results)
+}
+```
+
+```{r dpg-triplet-position-calculate-5h}
+# Calculate position data for all participants (excluding P07) - 5h window
+participants_noP07 <- c("P01", "P02", "P03", "P04", "P05", "P06", "P09", "P10")
+triplets <- c("DDD", "DDB", "DBD", "DBB", "BDD", "BDB", "BBD", "BBB")
+
+mean_triplet_pos_dpg_noP07 <- data.frame(
+  triplet = character(),
+  position = character(),
+  mean_dpg = numeric(),
+  sd_dpg = numeric(),
+  se_dpg = numeric(),
+  n_participants = integer(),
+  stringsAsFactors = FALSE
+)
+
+for(t in triplets) {
+  for(pos in c("pos1", "pos2", "pos3")) {
+    values <- c()
+    for(p in participants_noP07) {
+      # Select mapping
+      if(p %in% c("P01", "P02", "P03")) {
+        triplet_map <- triplet_positions_g1
+      } else if(p %in% c("P04", "P05", "P06", "P09")) {
+        triplet_map <- triplet_positions_g2
+      } else {
+        triplet_map <- triplet_positions_g4
+      }
+      
+      # Get DPG data
+      dpg_data <- ibuttons %>%
+        filter(id == p) %>%
+        filter(!(p == "P10" & session == "C04_05")) %>%
+        group_by(session) %>%
+        slice(1) %>%
+        ungroup() %>%
+        mutate(exp_session = as.numeric(gsub("C0[1-4]_", "", session))) %>%
+        select(exp_session, DPG_entire)
+      
+      # Calculate positions
+      pos_dpg <- calc_triplet_positions_dpg(p, dpg_data, triplet_map)
+      
+      # Extract value
+      if(t %in% pos_dpg$triplet) {
+        if(pos == "pos1") {
+          values <- c(values, pos_dpg$pos1_dpg[pos_dpg$triplet == t])
+        } else if(pos == "pos2") {
+          values <- c(values, pos_dpg$pos2_dpg[pos_dpg$triplet == t])
+        } else {
+          values <- c(values, pos_dpg$pos3_dpg[pos_dpg$triplet == t])
+        }
+      }
+    }
+    
+    if(length(values) > 0) {
+      n <- length(values)
+      mean_triplet_pos_dpg_noP07 <- rbind(mean_triplet_pos_dpg_noP07, data.frame(
+        triplet = t,
+        position = pos,
+        mean_dpg = mean(values, na.rm = TRUE),
+        sd_dpg = sd(values, na.rm = TRUE),
+        se_dpg = sd(values, na.rm = TRUE) / sqrt(n),
+        n_participants = n
+      ))
+    }
+  }
+}
+
+# Prepare for plotting
+df_plot_positions_triplet_dpg_noP07 <- mean_triplet_pos_dpg_noP07 %>%
+  mutate(
+    position_label = case_when(
+      position == "pos1" ~ "Position 1",
+      position == "pos2" ~ "Position 2",
+      position == "pos3" ~ "Position 3"
+    ),
+    position_num = case_when(
+      position == "pos1" ~ 1,
+      position == "pos2" ~ 2,
+      position == "pos3" ~ 3
+    ),
+    light_type = case_when(
+      position == "pos1" ~ substr(triplet, 1, 1),
+      position == "pos2" ~ substr(triplet, 2, 2),
+      position == "pos3" ~ substr(triplet, 3, 3)
+    ),
+    light_label = ifelse(light_type == "D", "dim", "bright")
+  ) %>%
+  mutate(triplet = factor(triplet, levels = c("DDD", "BDD", "DBD", "BBD", 
+                                              "DDB", "BDB", "DBB", "BBB")))
+```
+
+```{r dpg-triplet-position-plot-5h-with-error-panel}
+# Define colors
+light_colors <- c("dim" = "#4A90E2", "bright" = "#F5A623")
+
+# Main plot without error bars
+p_main_triplet <- ggplot(df_plot_positions_triplet_dpg_noP07, 
+                         aes(x = position_num, y = mean_dpg, group = triplet)) +
+  geom_line(color = "grey60", linewidth = 0.6, alpha = 0.7) +
+  geom_point(aes(color = light_label), size = 5, shape = 16) +
+  scale_color_manual(values = light_colors,
+                     labels = c("dim" = "Dim (10 lx)", "bright" = "Bright (1000 lx)")) +
+  scale_x_continuous(breaks = c(1, 2, 3), 
+                     labels = c("Position 1", "Position 2", "Position 3"),
+                     limits = c(0.8, 3.2)) +
+  labs(
+    title = "Distal-proximal gradient across light exposure triplets",
+    subtitle = "Mean DPG across all participants (5-h exposure; P07 excluded)",
+    x = "Triplet position",
+    y = "Mean Distal-Proximal Gradient (°C)",
+    color = "Light condition"
+  ) +
+  theme_classic(base_size = 14) +
+  theme(
+    aspect.ratio = 1,
+    plot.title = element_text(size = 16, hjust = 0),
+    plot.subtitle = element_text(size = 13, hjust = 0, margin = margin(b = 10)),
+    axis.text = element_text(color = "black", size = 13),
+    axis.title = element_text(size = 14),
+    panel.grid.major.y = element_line(color = "grey90", linewidth = 0.3),
+    legend.position = "right"
+  )
+
+# Error Bar Panel 
+p_error_triplet <- ggplot(df_plot_positions_triplet_dpg_noP07, 
+                          aes(x = triplet, y = mean_dpg, color = light_label)) +
+  geom_errorbar(aes(ymin = mean_dpg - se_dpg, ymax = mean_dpg + se_dpg),
+                width = 0.3, linewidth = 0.8) +
+  geom_point(size = 3, shape = 16) +
+  facet_wrap(~ position_label, ncol = 1, scales = "free_y") +
+  scale_color_manual(values = light_colors) +
+  labs(
+    title = "SE per Triplet",
+    y = NULL,
+    x = "Triplet"
+  ) +
+  theme_classic(base_size = 11) +
+  theme(
+    aspect.ratio = 1.5, 
+    plot.title = element_text(size = 12, hjust = 0.5, face = "bold"),
+    axis.text.x = element_text(size = 8, angle = 45, hjust = 1),
+    axis.text.y = element_text(size = 9),
+    strip.text = element_text(size = 10, face = "bold"),
+    strip.background = element_rect(fill = "grey90"),
+    legend.position = "none",
+    panel.grid.major.y = element_line(color = "grey90", linewidth = 0.3)
+  )
+
+# Combine both plots
+p_main_triplet + p_error_triplet + plot_layout(widths = c(3, 1))
+```
+
+```{r dpg-triplet-position-calculate-intervention}
+# Calculate position data for intervention window (excluding P07) - 1.5h window
+participants_int <- c("P01", "P02", "P03", "P04", "P05", "P06", "P09", "P10")
+
+mean_triplet_pos_dpg_int_noP07 <- data.frame(
+  triplet = character(),
+  position = character(),
+  mean_dpg_int = numeric(),
+  sd_dpg_int = numeric(),
+  se_dpg_int = numeric(),
+  n_participants = integer(),
+  stringsAsFactors = FALSE
+)
+
+for(t in triplets) {
+  for(pos in c("pos1", "pos2", "pos3")) {
+    values <- c()
+    for(p in participants_int) {
+      # Select mapping
+      if(p %in% c("P01", "P02", "P03")) {
+        triplet_map <- triplet_positions_g1
+      } else if(p %in% c("P04", "P05", "P06", "P09")) {
+        triplet_map <- triplet_positions_g2
+      } else {
+        triplet_map <- triplet_positions_g4
+      }
+      
+      # Get intervention DPG data
+      dpg_data_int <- ibuttons %>%
+        filter(id == p) %>%
+        filter(!(p == "P10" & session == "C04_05")) %>%
+        group_by(session) %>%
+        slice(1) %>%
+        ungroup() %>%
+        mutate(exp_session = as.numeric(gsub("C0[1-4]_", "", session))) %>%
+        select(exp_session, DPG_intervention)
+      
+      # Calculate positions
+      pos_dpg_int <- calc_triplet_positions_dpg_int(p, dpg_data_int, triplet_map)
+      
+      # Extract value
+      if(t %in% pos_dpg_int$triplet) {
+        if(pos == "pos1") {
+          values <- c(values, pos_dpg_int$pos1_dpg_int[pos_dpg_int$triplet == t])
+        } else if(pos == "pos2") {
+          values <- c(values, pos_dpg_int$pos2_dpg_int[pos_dpg_int$triplet == t])
+        } else {
+          values <- c(values, pos_dpg_int$pos3_dpg_int[pos_dpg_int$triplet == t])
+        }
+      }
+    }
+    
+    if(length(values) > 0) {
+      n <- length(values)
+      mean_triplet_pos_dpg_int_noP07 <- rbind(mean_triplet_pos_dpg_int_noP07, data.frame(
+        triplet = t,
+        position = pos,
+        mean_dpg_int = mean(values, na.rm = TRUE),
+        sd_dpg_int = sd(values, na.rm = TRUE),
+        se_dpg_int = sd(values, na.rm = TRUE) / sqrt(n),
+        n_participants = n
+      ))
+    }
+  }
+}
+
+# Prepare for plotting
+df_plot_positions_triplet_dpg_int_noP07 <- mean_triplet_pos_dpg_int_noP07 %>%
+  mutate(
+    position_label = case_when(
+      position == "pos1" ~ "Position 1",
+      position == "pos2" ~ "Position 2",
+      position == "pos3" ~ "Position 3"
+    ),
+    position_num = case_when(
+      position == "pos1" ~ 1,
+      position == "pos2" ~ 2,
+      position == "pos3" ~ 3
+    ),
+    light_type = case_when(
+      position == "pos1" ~ substr(triplet, 1, 1),
+      position == "pos2" ~ substr(triplet, 2, 2),
+      position == "pos3" ~ substr(triplet, 3, 3)
+    ),
+    light_label = ifelse(light_type == "D", "dim", "bright")
+  ) %>%
+  mutate(triplet = factor(triplet, levels = c("DDD", "BDD", "DBD", "BBD", 
+                                              "DDB", "BDB", "DBB", "BBB")))
+```
+
+```{r dpg-triplet-position-plot-intervention-with-error-panel}
+# Main plot without error bars
+p_main_triplet_int <- ggplot(df_plot_positions_triplet_dpg_int_noP07, 
+                             aes(x = position_num, y = mean_dpg_int, group = triplet)) +
+  geom_line(color = "grey60", linewidth = 0.6, alpha = 0.7) +
+  geom_point(aes(color = light_label), size = 5, shape = 16) +
+  scale_color_manual(values = light_colors,
+                     labels = c("dim" = "Dim (10 lx)", "bright" = "Bright (1000 lx)")) +
+  scale_x_continuous(breaks = c(1, 2, 3), 
+                     labels = c("Position 1", "Position 2", "Position 3"),
+                     limits = c(0.8, 3.2)) +
+  labs(
+    title = "Distal-proximal gradient across light exposure triplets",
+    subtitle = "Mean DPG across all participants (1.5-h intervention window; P07 excluded)",
+    x = "Triplet position",
+    y = "Mean Distal-Proximal Gradient (°C)",
+    color = "Light condition"
+  ) +
+  theme_classic(base_size = 14) +
+  theme(
+    aspect.ratio = 1,
+    plot.title = element_text(size = 16, hjust = 0),
+    plot.subtitle = element_text(size = 13, hjust = 0, margin = margin(b = 10)),
+    axis.text = element_text(color = "black", size = 13),
+    axis.title = element_text(size = 14),
+    panel.grid.major.y = element_line(color = "grey90", linewidth = 0.3),
+    legend.position = "right"
+  )
+
+# Error bar panel (right)
+p_error_triplet_int <- ggplot(df_plot_positions_triplet_dpg_int_noP07, 
+                              aes(x = triplet, y = mean_dpg_int, color = light_label)) +
+  geom_errorbar(aes(ymin = mean_dpg_int - se_dpg_int, ymax = mean_dpg_int + se_dpg_int),
+                width = 0.3, linewidth = 0.8) +
+  geom_point(size = 3, shape = 16) +
+  facet_wrap(~ position_label, ncol = 1, scales = "free_y") +
+  scale_color_manual(values = light_colors) +
+  labs(
+    title = "SE per Triplet",
+    y = NULL,
+    x = "Triplet"
+  ) +
+  theme_classic(base_size = 11) +
+  theme(
+    aspect.ratio = 1.5,  
+    plot.title = element_text(size = 12, hjust = 0.5, face = "bold"),
+    axis.text.x = element_text(size = 8, angle = 45, hjust = 1),
+    axis.text.y = element_text(size = 9),
+    strip.text = element_text(size = 10, face = "bold"),
+    strip.background = element_rect(fill = "grey90"),
+    legend.position = "none",
+    panel.grid.major.y = element_line(color = "grey90", linewidth = 0.3)
+  )
+
+# Combine both plots
+p_main_triplet_int + p_error_triplet_int + plot_layout(widths = c(3, 1))
+```
+
+# DPG Doublet Descriptive Statistics
+
+```{r dpg-doublet-stats}
+# Calculate statistics for doublet 5-h exposure
+doublet_stats_dpg_5h <- df_plot_dpg_noP07 %>%
+  group_by(doublet) %>%
+  summarise(
+    n_5h = n(),
+    median_5h = median(mean_dpg, na.rm = TRUE),
+    IQR_5h = IQR(mean_dpg, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Calculate statistics for doublet 1.5-h exposure
+doublet_stats_dpg_1.5h <- df_plot_dpg_int_noP07 %>%
+  group_by(doublet) %>%
+  summarise(
+    n_1.5h = n(),
+    median_1.5h = median(mean_dpg_int, na.rm = TRUE),
+    IQR_1.5h = IQR(mean_dpg_int, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Combine both exposure windows
+doublet_stats_dpg_combined <- doublet_stats_dpg_5h %>%
+  full_join(doublet_stats_dpg_1.5h, by = "doublet") %>%
+  arrange(doublet)
+
+# Display as formatted table
+knitr::kable(
+  doublet_stats_dpg_combined,
+  digits = 2,
+  col.names = c("Doublet", "N", "Median", "IQR", "N", "Median", "IQR"),
+  caption = "Descriptive statistics for doublet second-day DPG across exposure windows (P07 excluded)",
+  align = c("l", rep("r", 6))
+) %>%
+  kableExtra::add_header_above(c(" " = 1, "5-h Exposure" = 3, "1.5-h Exposure" = 3))
+```
+
+```{r dpg-triplet-stats}
+# Calculate statistics for triplet 5-h exposure
+triplet_stats_dpg_5h <- df_plot_dpg_triplet_noP07 %>%
+  group_by(triplet) %>%
+  summarise(
+    n_5h = n(),
+    median_5h = median(mean_dpg, na.rm = TRUE),
+    IQR_5h = IQR(mean_dpg, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Calculate statistics for triplet 1.5-h exposure
+triplet_stats_dpg_1.5h <- df_plot_dpg_triplet_int_noP07 %>%
+  group_by(triplet) %>%
+  summarise(
+    n_1.5h = n(),
+    median_1.5h = median(mean_dpg_int, na.rm = TRUE),
+    IQR_1.5h = IQR(mean_dpg_int, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Combine both exposure windows
+triplet_stats_dpg_combined <- triplet_stats_dpg_5h %>%
+  full_join(triplet_stats_dpg_1.5h, by = "triplet") %>%
+  arrange(triplet)
+
+# Display as formatted table
+knitr::kable(
+  triplet_stats_dpg_combined,
+  digits = 2,
+  col.names = c("Triplet", "N", "Median", "IQR", "N", "Median", "IQR"),
+  caption = "Descriptive statistics for triplet third-day DPG across exposure windows (P07 excluded)",
+  align = c("l", rep("r", 6))
+) %>%
+  kableExtra::add_header_above(c(" " = 1, "5-h Exposure" = 3, "1.5-h Exposure" = 3))
+```
+
+# DPG Triplet Time-Course Analysis
+
+## Data Preparation
+
+```{r dpg-triplet-timecourse-setup}
+# Get session 3 data for each triplet 
+participants_noP07 <- c("P01", "P02", "P03", "P04", "P05", "P06", "P09", "P10")
+triplets_all <- c("DDD", "DDB", "DBD", "DBB", "BDD", "BDB", "BBD", "BBB")
+
+# Function to get session 3 for each triplet type
+get_triplet_session3 <- function(p, triplet_type) {
+  if(p %in% c("P01", "P02", "P03")) {
+    df_triplets <- df_triplets_g1
+  } else if(p %in% c("P04", "P05", "P06", "P09")) {
+    df_triplets <- df_triplets_g2
+  } else {
+    df_triplets <- data.frame(
+      session_start = 1:(length(light_g4_orig)-2),
+      session_mid = 2:(length(light_g4_orig)-1),
+      session_end = 3:length(light_g4_orig),
+      triplet = sapply(1:(length(light_g4_orig)-2), function(i) 
+        paste0(light_g4_orig[i:(i+2)], collapse = ""))
+    ) %>%
+      filter(!str_detect(triplet, "X")) %>%
+      filter(session_start != 5 & session_mid != 5 & session_end != 5)
+  }
+  
+  sessions_3 <- df_triplets %>%
+    filter(triplet == triplet_type) %>%
+    pull(session_end)
+  
+  return(sessions_3)
+}
+
+# Function to get all participant-session combinations for a triplet
+get_triplet_sessions_overview <- function(triplet_type) {
+  overview <- data.frame()
+  
+  for(p in participants_noP07) {
+    sessions_3 <- get_triplet_session3(p, triplet_type)
+    
+    if(length(sessions_3) > 0) {
+      for(s in sessions_3) {
+        overview <- rbind(overview, data.frame(
+          participant_id = p,
+          session = s
+        ))
+      }
+    }
+  }
+  
+  return(overview %>% arrange(session, participant_id))
+}
+
+# Function to get group ID from participant ID
+get_group_id <- function(p) {
+  if(p %in% c("P01", "P02", "P03")) return(1)
+  if(p %in% c("P04", "P05")) return(2)
+  if(p %in% c("P06", "P07", "P09")) return(3)
+  if(p == "P10") return(4)
+  return(NA)
+}
+
+# Function to create DPG plot for one triplet type
+plot_triplet_timecourse_dpg <- function(triplet_type) {
+  df_triplet_dpg <- data.frame()
+  
+  for(p in participants_noP07) {
+    sessions_3 <- get_triplet_session3(p, triplet_type)
+    
+    if(length(sessions_3) > 0) {
+      group_id <- get_group_id(p)
+      session_ids <- paste0("C0", group_id, "_", sprintf("%02d", sessions_3))
+      
+      p_data <- ibuttons %>%
+        filter(id == p, session %in% session_ids) %>%
+        select(id, session, time_block, DPG_30min) %>%
+        filter(!is.na(time_block)) %>%
+        group_by(session, time_block) %>%
+        slice(1) %>%
+        ungroup()
+      
+      df_triplet_dpg <- rbind(df_triplet_dpg, p_data)
+    }
+  }
+  
+  if(nrow(df_triplet_dpg) == 0) {
+    warning(paste("No data found for triplet", triplet_type))
+    return(NULL)
+  }
+  
+  df_triplet_dpg <- df_triplet_dpg %>%
+    group_by(id, session) %>%
+    arrange(time_block) %>%
+    mutate(block_num = row_number()) %>%
+    ungroup()
+  
+  triplet_summary <- df_triplet_dpg %>%
+    group_by(block_num) %>%
+    summarise(
+      mean_dpg = mean(DPG_30min, na.rm = TRUE),
+      sd_dpg = sd(DPG_30min, na.rm = TRUE),
+      n = n(),
+      .groups = "drop"
+    )
+  
+  y_min <- floor(min(triplet_summary$mean_dpg - triplet_summary$sd_dpg, 
+                     na.rm = TRUE) * 10) / 10 - 0.1
+  y_max <- ceiling(max(triplet_summary$mean_dpg + triplet_summary$sd_dpg, 
+                       na.rm = TRUE) * 10) / 10 + 0.1
+  
+  third_letter <- substr(triplet_type, 3, 3)
+  intervention_color <- ifelse(third_letter == "D", "#F5F5F5", "#FFF9E6")
+  intervention_alpha <- ifelse(third_letter == "D", 0.4, 0.8)
+  intervention_label <- ifelse(third_letter == "D", "dim\n(10 lx)", "bright\n(1000 lx)")
+  
+  triplet_first_two <- substr(triplet_type, 1, 2)
+  triplet_third <- substr(triplet_type, 3, 3)
+  
+  p <- ggplot(triplet_summary, aes(x = block_num, y = mean_dpg)) +
+    annotate("rect", xmin = 0.5, xmax = 6.5, ymin = -Inf, ymax = Inf, 
+             fill = "#F5F5F5", alpha = 0.4) +
+    annotate("rect", xmin = 6.5, xmax = 9.5, ymin = -Inf, ymax = Inf, 
+             fill = intervention_color, alpha = intervention_alpha) +
+    annotate("rect", xmin = 9.5, xmax = 10.5, ymin = -Inf, ymax = Inf, 
+             fill = "#F5F5F5", alpha = 0.4) +
+    annotate("text", x = 3.5, y = y_max - 0.05, label = "dim\n(10 lx)", 
+             hjust = 0.5, vjust = 1, size = 3.5, color = "grey50", fontface = "italic") +
+    annotate("text", x = 8, y = y_max - 0.05, label = intervention_label, 
+             hjust = 0.5, vjust = 1, size = 3.5, 
+             color = ifelse(third_letter == "D", "grey50", "#B8860B"), 
+             fontface = "italic") +
+    annotate("text", x = 10, y = y_max - 0.05, label = "dim\n(10 lx)", 
+             hjust = 0.5, vjust = 1, size = 3.5, color = "grey50", fontface = "italic") +
+    geom_ribbon(aes(ymin = mean_dpg - sd_dpg,
+                    ymax = mean_dpg + sd_dpg),
+                alpha = 0.15, fill = "grey40") +
+    geom_line(linewidth = 0.8, color = "black") +
+    geom_point(size = 3.5, shape = 16, color = "black") +
+    scale_x_continuous(
+      breaks = 1:10,
+      labels = c(
+        "B1\n(5.25h)", "B2", "B3\n(4.25h)", "B4", "B5\n(3.25h)", 
+        "B6", "B7\n(2.25h)", "B8", "B9\n(1.25h)", "B10"
+      ),
+      limits = c(0.5, 10.5),
+      expand = c(0, 0)
+    ) +
+    scale_y_continuous(limits = c(y_min, y_max), expand = c(0, 0)) +
+    labs(
+      title = bquote("Distal-proximal gradient time course - Triplet " * 
+                     .(triplet_first_two) * bold(.(triplet_third))),
+      subtitle = paste0("Grand average third-day (n=", 
+                       length(unique(df_triplet_dpg$id)), 
+                       " participants; P07 excluded)"),
+      x = "30-minute block (hours before HBT)",
+      y = "Mean distal-proximal gradient (°C)"
+    ) +
+    theme_classic(base_size = 14) +
+    theme(
+      aspect.ratio = 1,
+      plot.title = element_text(size = 16, hjust = 0),
+      plot.subtitle = element_text(size = 13, hjust = 0, margin = margin(b = 10)),
+      axis.text = element_text(color = "black", size = 13),
+      axis.text.x = element_text(size = 9, margin = margin(t = 5)),
+      axis.title = element_text(size = 14),
+      axis.title.x = element_text(margin = margin(t = 12)),
+      axis.title.y = element_text(margin = margin(r = 8)),
+      panel.grid.major.y = element_line(color = "grey90", linewidth = 0.3),
+      plot.margin = margin(15, 10, 10, 10)
+    )
+  
+  return(p)
+}
+```
+
+## DDD Triplet
+
+```{r dpg-triplet-DDD-sessions}
+knitr::kable(get_triplet_sessions_overview("DDD"),
+             caption = "Sessions used for Triplet DDD (DPG)")
+```
+
+```{r dpg-triplet-DDD-plot}
+plot_triplet_timecourse_dpg("DDD")
+```
+
+## DDB Triplet
+
+```{r dpg-triplet-DDB-sessions}
+knitr::kable(get_triplet_sessions_overview("DDB"),
+             caption = "Sessions used for Triplet DDB (DPG)")
+```
+
+```{r dpg-triplet-DDB-plot}
+plot_triplet_timecourse_dpg("DDB")
+```
+
+## DBD Triplet
+
+```{r dpg-triplet-DBD-sessions}
+knitr::kable(get_triplet_sessions_overview("DBD"),
+             caption = "Sessions used for Triplet DBD (DPG)")
+```
+
+```{r dpg-triplet-DBD-plot}
+plot_triplet_timecourse_dpg("DBD")
+```
+
+## DBB Triplet
+
+```{r dpg-triplet-DBB-sessions}
+knitr::kable(get_triplet_sessions_overview("DBB"),
+             caption = "Sessions used for Triplet DBB (DPG)")
+```
+
+```{r dpg-triplet-DBB-plot}
+plot_triplet_timecourse_dpg("DBB")
+```
+
+## BDD Triplet
+
+```{r dpg-triplet-BDD-sessions}
+knitr::kable(get_triplet_sessions_overview("BDD"),
+             caption = "Sessions used for Triplet BDD (DPG)")
+```
+
+```{r dpg-triplet-BDD-plot}
+plot_triplet_timecourse_dpg("BDD")
+```
+
+## BDB Triplet
+
+```{r dpg-triplet-BDB-sessions}
+knitr::kable(get_triplet_sessions_overview("BDB"),
+             caption = "Sessions used for Triplet BDB (DPG)")
+```
+
+```{r dpg-triplet-BDB-plot}
+plot_triplet_timecourse_dpg("BDB")
+```
+
+## BBD Triplet
+
+```{r dpg-triplet-BBD-sessions}
+knitr::kable(get_triplet_sessions_overview("BBD"),
+             caption = "Sessions used for Triplet BBD (DPG)")
+```
+
+```{r dpg-triplet-BBD-plot}
+plot_triplet_timecourse_dpg("BBD")
+```
+
+## BBB Triplet
+
+```{r dpg-triplet-BBB-sessions}
+knitr::kable(get_triplet_sessions_overview("BBB"),
+             caption = "Sessions used for Triplet BBB (DPG)")
+```
+
+```{r dpg-triplet-BBB-plot}
+plot_triplet_timecourse_dpg("BBB")
+```
+
+# DPG Triplet Time-Course Summary Table
+
+```{r dpg-triplet-timecourse-summary-table}
+# Combine all triplet data for the unified table
+triplets_all_list <- c("DDD", "DDB", "DBD", "DBB", "BDD", "BDB", "BBD", "BBB")
+
+df_all_triplets_dpg_unified <- data.frame()
+
+for(triplet_type in triplets_all_list) {
+  df_triplet_dpg <- data.frame()
+  
+  for(p in participants_noP07) {
+    sessions_3 <- get_triplet_session3(p, triplet_type)
+    
+    if(length(sessions_3) > 0) {
+      group_id <- get_group_id(p)
+      session_ids <- paste0("C0", group_id, "_", sprintf("%02d", sessions_3))
+      
+      p_data <- ibuttons %>%
+        filter(id == p, session %in% session_ids) %>%
+        select(id, session, time_block, DPG_30min) %>%
+        filter(!is.na(time_block)) %>%
+        group_by(session, time_block) %>%
+        slice(1) %>%
+        ungroup() %>%
+        mutate(triplet = triplet_type)
+      
+      df_triplet_dpg <- rbind(df_triplet_dpg, p_data)
+    }
+  }
+  
+  # Assign block numbers
+  df_triplet_dpg <- df_triplet_dpg %>%
+    group_by(id, session) %>%
+    arrange(time_block) %>%
+    mutate(block_num = row_number()) %>%
+    ungroup()
+  
+  df_all_triplets_dpg_unified <- rbind(df_all_triplets_dpg_unified, df_triplet_dpg)
+}
+
+# Calculate summary statistics per triplet and block
+triplet_summary_dpg_unified <- df_all_triplets_dpg_unified %>%
+  group_by(triplet, block_num) %>%
+  summarise(
+    mean_dpg = mean(DPG_30min, na.rm = TRUE),
+    sd_dpg = sd(DPG_30min, na.rm = TRUE),
+    n = n(),
+    .groups = "drop"
+  ) %>%
+  mutate(triplet = factor(triplet, levels = triplets_all_list))
+
+# Create table with mean ± SD for all triplets
+triplet_timecourse_dpg_table <- triplet_summary_dpg_unified %>%
+  mutate(
+    mean_sd = sprintf("%.2f ± %.2f", mean_dpg, sd_dpg)
+  ) %>%
+  select(triplet, block_num, mean_sd) %>%
+  pivot_wider(
+    names_from = block_num,
+    values_from = mean_sd,
+    names_prefix = "B"
+  )
+
+knitr::kable(
+  triplet_timecourse_dpg_table,
+  caption = "Triplet time-course: Mean ± SD distal-proximal gradient (°C) per 30-minute block",
+  align = c("l", rep("r", 10))
+) %>%
+  kableExtra::kable_styling(bootstrap_options = c("striped", "hover", "condensed"), 
+                           full_width = FALSE) %>%
+  kableExtra::row_spec(0, bold = TRUE)
+```
+
+# DPG Grand Average Time Course
+
+```{r dpg-grand-average-timecourse}
+# Map light conditions to each session for DPG (making sure the light patterns are available)
+light_patterns_dpg <- list(
+  P01 = c("D", "D", "D", "B", "B", "B", "D", "D", "B", "D", "B"),
+  P02 = c("D", "D", "D", "B", "B", "B", "D", "D", "B", "D", "B"),
+  P03 = c("D", "D", "D", "B", "B", "B", "D", "D", "B", "D", "B"),
+  P04 = c("D", "B", "B", "B", "D", "D", "D", "B", "D", "B"),
+  P05 = c("D", "B", "B", "B", "D", "D", "D", "B", "D", "B"),
+  P06 = c("D", "B", "B", "B", "D", "D", "D", "B", "D", "B"),
+  P07 = c("D", "B", "B", "B", "D", "D", "D", "B", "D", "B"),
+  P09 = c("D", "B", "B", "B", "D", "D", "D", "B", "D", "B")
+)
+
+# Add P10 pattern (12 sessions without session 5)
+light_patterns_dpg[["P10"]] <- c("D", "D", "D", "B", "D", "B", "B", "B", "D", "B", "D", "D")
+
+df_light_dpg <- bind_rows(
+  # All participants except P10
+  bind_rows(lapply(names(light_patterns_dpg), function(p) {
+    pattern <- light_patterns_dpg[[p]]
+    data.frame(
+      id = p,
+      exp_session = seq_along(pattern),
+      light = pattern,
+      stringsAsFactors = FALSE
+    )
+  })),
+  # P10 
+  data.frame(
+    id = "P10",
+    exp_session = 1:13,
+    light = ifelse(1:13 %in% c(1,2,3,6,10,12,13), "D", "B"),
+    stringsAsFactors = FALSE
+  )
+)
+
+# Add group information and create session IDs
+df_light_dpg <- df_light_dpg %>%
+  mutate(
+    group = case_when(
+      id %in% c("P01", "P02", "P03") ~ 1,
+      id %in% c("P04", "P05") ~ 2,
+      id %in% c("P06", "P07", "P09") ~ 3,
+      id == "P10" ~ 4
+    ),
+    session = paste0("C0", group, "_", sprintf("%02d", exp_session))
+  )
+
+# Join with DPG data - get one row per session and time_block
+df_dpg_light <- ibuttons %>%
+  filter(id %in% c("P01", "P02", "P03", "P04", "P05", "P06", "P07", "P09", "P10")) %>%
+  filter(!is.na(time_block)) %>%
+  group_by(id, session, time_block) %>%
+  slice(1) %>%
+  ungroup() %>%
+  inner_join(df_light_dpg, by = c("id", "session"))
+
+# Assign block numbers (1-10)
+df_dpg_light <- df_dpg_light %>%
+  group_by(id, session) %>%
+  arrange(time_block) %>%
+  mutate(block_num = row_number()) %>%
+  ungroup()
+
+# Calculate per-participant summary
+df_summary_dpg_per_participant <- df_dpg_light %>%
+  group_by(id, block_num, light) %>%
+  summarise(
+    mean_dpg = mean(DPG_30min, na.rm = TRUE),
+    sd_dpg = sd(DPG_30min, na.rm = TRUE),
+    n = n(),
+    se_dpg = sd_dpg / sqrt(n),
+    .groups = "drop"
+  ) %>%
+  mutate(light = factor(light, levels = c("D", "B"), labels = c("Dim", "Bright")))
+
+# Grand average excluding P07
+df_summary_dpg_noP07 <- df_summary_dpg_per_participant %>%
+  filter(id != "P07")
+
+grand_summary_dpg_manual <- data.frame()
+
+for(b in unique(df_summary_dpg_noP07$block_num)) {
+  for(l in levels(df_summary_dpg_noP07$light)) {
+    vals <- df_summary_dpg_noP07 %>%
+      filter(block_num == b, light == l) %>%
+      pull(mean_dpg)
+    
+    n_val <- length(vals)
+    mean_val <- mean(vals, na.rm = TRUE)
+    sd_val <- sd(vals, na.rm = TRUE)
+    se_val <- sd_val / sqrt(n_val)
+    
+    grand_summary_dpg_manual <- rbind(grand_summary_dpg_manual, data.frame(
+      block_num = b,
+      light = l,
+      mean_dpg = mean_val,
+      sd_dpg = sd_val,
+      n = n_val,
+      se_dpg = se_val
+    ))
+  }
+}
+
+grand_summary_dpg_manual$light <- factor(grand_summary_dpg_manual$light, 
+                                         levels = c("Bright", "Dim"))
+```
+
+```{r dpg-grand-average-plot}
+# Ensure block_num is numeric
+grand_summary_dpg_manual <- grand_summary_dpg_manual %>%
+  mutate(block_num = as.numeric(block_num))
+
+# Define labels
+hbt_values <- c("5.25", "4.75", "4.25", "3.75", "3.25", "2.75", "2.25", "1.75", "1.25", "0.75")
+
+# Create x-axis labels
+x_labels <- sapply(1:10, function(i) {
+  if (i %% 2 == 1) {  
+    paste0("B", i, "\n(", hbt_values[i], "h)")
+  } else {  
+    paste0("B", i)
+  }
+})
+
+# Y-axis limits
+y_min <- floor(min(grand_summary_dpg_manual$mean_dpg - grand_summary_dpg_manual$se_dpg, 
+                   na.rm = TRUE) * 10) / 10 - 0.1
+y_max <- ceiling(max(grand_summary_dpg_manual$mean_dpg + grand_summary_dpg_manual$se_dpg, 
+                     na.rm = TRUE) * 10) / 10 + 0.1
+
+# Create plot
+ggplot(grand_summary_dpg_manual, 
+       aes(x = block_num, y = mean_dpg, 
+           color = light, fill = light, group = light)) +
+  # Background shading
+  annotate("rect", xmin = 0.5, xmax = 6.5, ymin = -Inf, ymax = Inf, 
+           fill = "#F5F5F5", alpha = 0.4) +
+  annotate("rect", xmin = 6.5, xmax = 9.5, ymin = -Inf, ymax = Inf, 
+           fill = "#FFF9E6", alpha = 0.8) +
+  annotate("rect", xmin = 9.5, xmax = 10.5, ymin = -Inf, ymax = Inf, 
+           fill = "#F5F5F5", alpha = 0.4) +
+  annotate("text", x = 3.75, y = y_max - 0.05, label = "dim\n(10 lx)",  
+           hjust = 0.5, vjust = 1, size = 3.5, color = "grey50", fontface = "italic") +
+  annotate("text", x = 8, y = y_max - 0.05, label = "intervention\n(10 or 1000 lx)",  
+           hjust = 0.5, vjust = 1, size = 3.5, color = "#B8860B", fontface = "italic") +
+  annotate("text", x = 10, y = y_max - 0.05, label = "dim\n(10 lx)", 
+           hjust = 0.5, vjust = 1, size = 3.5, color = "grey50", fontface = "italic") + 
+  # Ribbon for SE
+  geom_ribbon(aes(ymin = mean_dpg - se_dpg,
+                  ymax = mean_dpg + se_dpg),
+              alpha = 0.1, color = NA, show.legend = FALSE) +
+  # Line and points
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 3.5, shape = 16) +
+  # Colors
+  scale_color_manual(
+    values = c("Bright" = "#F5A623", "Dim" = "#4A90E2"),
+    labels = c("Bright" = "Bright (1000 lx)", "Dim" = "Dim (10 lx)")
+  ) +
+  scale_fill_manual(
+    values = c("Bright" = "#F5A623", "Dim" = "#4A90E2"),
+    labels = c("Bright" = "Bright (1000 lx)", "Dim" = "Dim (10 lx)")
+  ) +
+  # Axes 
+  scale_x_continuous(
+    breaks = 1:10,
+    labels = x_labels,
+    limits = c(0.5, 10.5),
+    expand = c(0, 0)
+  ) +
+  scale_y_continuous(limits = c(y_min, y_max), expand = c(0, 0)) +
+  # Labels
+  labs(
+    title = "Distal-proximal gradient time course",
+    subtitle = "Grand average across participants (P07 excluded, n=8)",
+    x = "30-minute block (hours before HBT)",
+    y = "Mean Distal-Proximal Gradient (°C)",
+    color = "Light condition",
+    fill = "Light condition"
+  ) +
+  # Theme
+  theme_classic(base_size = 14) +
+  theme(
+    aspect.ratio = 1,
+    plot.title = element_text(size = 16, hjust = 0),
+    plot.subtitle = element_text(size = 13, hjust = 0, margin = margin(b = 10)),
+    axis.text = element_text(color = "black", size = 13),
+    axis.text.x = element_text(size = 9, margin = margin(t = 5)),
+    axis.title = element_text(size = 14),
+    axis.title.x = element_text(margin = margin(t = 12)),
+    axis.title.y = element_text(margin = margin(r = 8)),
+    panel.grid.major.y = element_line(color = "grey90", linewidth = 0.3),
+    legend.position = "right",
+    plot.margin = margin(15, 10, 10, 10)
+  )
+```
+
+# DPG Panel View - Triplet and Grand Average Time Courses
+
+```{r dpg-panel-view-setup}
+#| label: fig-dpg-triplet-panel
+#| fig-cap: "Distal-proximal gradient time course - Grand average and triplet patterns (P07 excluded)"
+#| fig-width: 14
+#| fig-height: 8
+
+# 1. Prepare data for all triplets
+triplets_all_panel <- c("DDD", "BDD", "DBD", "BBD", "DDB", "BDB", "DBB", "BBB")
+
+df_all_triplets_dpg_for_panel <- data.frame()
+
+for(triplet_type in triplets_all_panel) {
+  df_triplet_dpg <- data.frame()
+  
+  for(p in participants_noP07) {
+    sessions_3 <- get_triplet_session3(p, triplet_type)
+    
+    if(length(sessions_3) > 0) {
+      group_id <- get_group_id(p)
+      session_ids <- paste0("C0", group_id, "_", sprintf("%02d", sessions_3))
+      
+      p_data <- ibuttons %>%
+        filter(id == p, session %in% session_ids) %>%
+        select(id, session, time_block, DPG_30min) %>%
+        filter(!is.na(time_block)) %>%
+        group_by(session, time_block) %>%
+        slice(1) %>%
+        ungroup() %>%
+        mutate(triplet = triplet_type)
+      
+      df_triplet_dpg <- rbind(df_triplet_dpg, p_data)
+    }
+  }
+  
+  df_triplet_dpg <- df_triplet_dpg %>%
+    group_by(id, session) %>%
+    arrange(time_block) %>%
+    mutate(block_num = row_number()) %>%
+    ungroup()
+  
+  df_all_triplets_dpg_for_panel <- rbind(df_all_triplets_dpg_for_panel, df_triplet_dpg)
+}
+
+# 2. Calculate summary per triplet
+triplet_summary_dpg_for_panel <- df_all_triplets_dpg_for_panel %>%
+  group_by(triplet, block_num) %>%
+  summarise(
+    mean_dpg = mean(DPG_30min, na.rm = TRUE),
+    sd_dpg = sd(DPG_30min, na.rm = TRUE),
+    n = n(),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    triplet = factor(triplet, levels = triplets_all_panel),
+    triplet_type = ifelse(substr(triplet, 3, 3) == "D", "Dim", "Bright")
+  )
+
+# 3. Unified Y-axis limits
+y_min_dpg_unified <- floor(min(triplet_summary_dpg_for_panel$mean_dpg - triplet_summary_dpg_for_panel$sd_dpg, 
+                               na.rm = TRUE) * 10) / 10 - 0.1
+y_max_dpg_unified <- ceiling(max(triplet_summary_dpg_for_panel$mean_dpg + triplet_summary_dpg_for_panel$sd_dpg, 
+                                 na.rm = TRUE) * 10) / 10 + 0.1
+
+# 4. Function to create triplet plot
+create_triplet_plot_dpg <- function(triplet_name, show_x = FALSE, show_y = TRUE) {
+  data_triplet <- triplet_summary_dpg_for_panel %>%
+    filter(triplet == triplet_name)
+  
+  triplet_third <- substr(triplet_name, 3, 3)
+  intervention_color <- ifelse(triplet_third == "D", "#F5F5F5", "#FFF9E6")
+  intervention_alpha <- ifelse(triplet_third == "D", 0.4, 0.8)
+  
+  triplet_first_two <- substr(triplet_name, 1, 2)
+  triplet_label <- paste0(triplet_first_two, "**", triplet_third, "**")
+  
+  x_labels_with_hbt <- c(
+    "B1\n(5.25h)", "B2", "B3\n(4.25h)", "B4", "B5\n(3.25h)", 
+    "B6", "B7\n(2.25h)", "B8", "B9\n(1.25h)", "B10"
+  )
+  
+  ggplot(data_triplet, aes(x = block_num, y = mean_dpg)) +
+    annotate("rect", xmin = 0.5, xmax = 6.5, ymin = -Inf, ymax = Inf, 
+             fill = "#F5F5F5", alpha = 0.4) +
+    annotate("rect", xmin = 6.5, xmax = 9.5, ymin = -Inf, ymax = Inf, 
+             fill = intervention_color, alpha = intervention_alpha) +
+    annotate("rect", xmin = 9.5, xmax = 10.5, ymin = -Inf, ymax = Inf, 
+             fill = "#F5F5F5", alpha = 0.4) +
+    geom_ribbon(aes(ymin = mean_dpg - sd_dpg, 
+                    ymax = mean_dpg + sd_dpg),
+                alpha = 0.15, fill = "grey40") +
+    geom_line(linewidth = 0.8, color = "black") +
+    geom_point(size = 2.5, shape = 16, color = "black") +
+    scale_x_continuous(
+      breaks = 1:10,
+      labels = if(show_x) x_labels_with_hbt else 1:10,
+      limits = c(0.5, 10.5),
+      expand = c(0, 0)
+    ) +
+    scale_y_continuous(limits = c(y_min_dpg_unified, y_max_dpg_unified), expand = c(0, 0)) +
+    labs(
+      title = triplet_label,
+      x = NULL,
+      y = if(show_y) "Mean DPG ± SD (°C)" else NULL
+    ) +
+    theme_classic(base_size = 11) +
+    theme(
+      plot.title = element_markdown(size = 11, hjust = 0.5, margin = margin(b = 5)),
+      axis.text = element_text(color = "black", size = 9),
+      axis.text.x = element_text(size = if(show_x) 7 else 8, margin = margin(t = 3)),
+      axis.title = element_text(size = 10),
+      axis.title.y = element_text(margin = margin(r = 5)),
+      panel.grid.major.y = element_line(color = "grey90", linewidth = 0.3),
+      plot.margin = margin(5, 5, if(show_x) 8 else 5, 5)
+    )
+}
+
+# 5. Create D-ending triplet plots (no x-axis labels)
+p_DDD_dpg <- create_triplet_plot_dpg("DDD", show_x = FALSE, show_y = TRUE)
+p_BDD_dpg <- create_triplet_plot_dpg("BDD", show_x = FALSE, show_y = FALSE)
+p_DBD_dpg <- create_triplet_plot_dpg("DBD", show_x = FALSE, show_y = FALSE)
+p_BBD_dpg <- create_triplet_plot_dpg("BBD", show_x = FALSE, show_y = FALSE)
+
+# 6. Create B-ending triplet plots (with x-axis labels)
+p_DDB_dpg <- create_triplet_plot_dpg("DDB", show_x = TRUE, show_y = TRUE)
+p_BDB_dpg <- create_triplet_plot_dpg("BDB", show_x = TRUE, show_y = FALSE)
+p_DBB_dpg <- create_triplet_plot_dpg("DBB", show_x = TRUE, show_y = FALSE)
+p_BBB_dpg <- create_triplet_plot_dpg("BBB", show_x = TRUE, show_y = FALSE)
+
+# 7. Grand Average plot
+p_grand_dpg <- ggplot(grand_summary_dpg_manual,
+       aes(x = block_num, y = mean_dpg,
+           color = light, fill = light, group = light)) +
+  annotate("rect", xmin = 0.5, xmax = 6.5, ymin = -Inf, ymax = Inf,
+           fill = "#F5F5F5", alpha = 0.4) +
+  annotate("rect", xmin = 9.5, xmax = 10.5, ymin = -Inf, ymax = Inf,
+           fill = "#F5F5F5", alpha = 0.4) +
+  annotate("rect", xmin = 6.5, xmax = 9.5, ymin = -Inf, ymax = Inf,
+           fill = "#FFF9E6", alpha = 0.8) +
+  geom_ribbon(aes(ymin = mean_dpg - se_dpg,
+                  ymax = mean_dpg + se_dpg),
+              alpha = 0.1, color = NA, show.legend = FALSE) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 2.5, shape = 16) +
+  scale_color_manual(
+    values = c("Bright" = "#F5A623", "Dim" = "#4A90E2"),
+    labels = c("Bright" = "Bright (1000lx)", "Dim" = "Dim (10lx)")
+  ) +
+  scale_fill_manual(
+    values = c("Bright" = "#F5A623", "Dim" = "#4A90E2"),
+    labels = c("Bright" = "Bright (1000lx)", "Dim" = "Dim (10lx)")
+  ) +
+  scale_x_continuous(
+    breaks = 1:10,
+    labels = 1:10,
+    limits = c(0.5, 10.5),
+    expand = c(0, 0)
+  ) +
+  scale_y_continuous(limits = c(y_min_dpg_unified, y_max_dpg_unified), expand = c(0, 0)) +
+  labs(
+    title = "Grand Average",
+    x = NULL,
+    y = NULL,
+    color = "Light condition"
+  ) +
+  guides(
+    color = guide_legend(override.aes = list(shape = 16, size = 2.5)),
+    fill = "none"
+  ) +
+  theme_classic(base_size = 11) +
+  theme(
+    plot.title = element_text(size = 11, hjust = 0.5, margin = margin(b = 5)),
+    axis.text = element_text(color = "black", size = 9),
+    axis.text.x = element_text(size = 8, margin = margin(t = 3)),
+    axis.title = element_text(size = 10),
+    panel.grid.major.y = element_line(color = "grey90", linewidth = 0.3),
+    legend.position = "bottom",
+    legend.title = element_text(size = 9),
+    legend.text = element_text(size = 7),
+    plot.margin = margin(5, 5, 5, 5)
+  )
+
+# 8. Empty spacer
+p_spacer_dpg <- ggplot() + theme_void()
+
+# 9. Combine in layout
+(p_DDD_dpg | p_BDD_dpg | p_DBD_dpg | p_BBD_dpg | p_grand_dpg) /
+(p_DDB_dpg | p_BDB_dpg | p_DBB_dpg | p_BBB_dpg | p_spacer_dpg) +
+  plot_annotation(
+    title = "Distal-proximal gradient time course - Grand average and triplet patterns",
+    subtitle = "Grand average and third-day triplet patterns (P07 excluded)",
+    caption = "30-minute block (hours before HBT)",
+    theme = theme(
+      plot.title = element_text(size = 15, hjust = 0, face = "plain"),
+      plot.subtitle = element_text(size = 12, hjust = 0, margin = margin(b = 8)),
+      plot.caption = element_text(size = 11, hjust = 0.5, margin = margin(t = 10))
+    )
+  )
+```
+
+# Data Preparation for DPG Statistical Analysis
+
+## Define Study Parameters for DPG
+
+```{r dpg-lmm-setup}
+# Define participant list and light patterns
+participant_list_dpg <- c("P01", "P02", "P03", "P04", "P05", "P06", "P07", "P09", "P10")
+
+# Light patterns for DPG (making sure light patterns are available)
+light_patterns_dpg <- list(
+  P01 = c("D", "D", "D", "B", "B", "B", "D", "D", "B", "D", "B"),
+  P02 = c("D", "D", "D", "B", "B", "B", "D", "D", "B", "D", "B"),
+  P03 = c("D", "D", "D", "B", "B", "B", "D", "D", "B", "D", "B"),
+  P04 = c("D", "B", "B", "B", "D", "D", "D", "B", "D", "B"),
+  P05 = c("D", "B", "B", "B", "D", "D", "D", "B", "D", "B"),
+  P06 = c("D", "B", "B", "B", "D", "D", "D", "B", "D", "B"),
+  P07 = c("D", "B", "B", "B", "D", "D", "D", "B", "D", "B"),
+  P09 = c("D", "B", "B", "B", "D", "D", "D", "B", "D", "B")
+)
+
+# Combine DPG data with light information
+ibuttons_lmm <- map_dfr(participant_list_dpg, ~{
+  df <- ibuttons %>% 
+    filter(id == .x) %>%
+    # Extract session number from session variable (e.g., "C01_01" -> 1, "C01_02" -> 2)
+    mutate(exp_session = as.integer(gsub("C0[1-4]_", "", session))) %>%
+    # Keep only DPG_intervention values (one per session)
+    filter(!is.na(DPG_intervention)) %>%
+    distinct(id, exp_session, DPG_intervention, .keep_all = TRUE) %>%
+    select(id, exp_session, DPG_intervention) %>%
+    rename(participant_id = id)
+  
+  # Special light pattern assignment for P10 (light automation malfunction session 5)
+  if(.x == "P10") {
+    # Manual assignment for each actual session number
+    light_df <- tibble(
+      exp_session = c(1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 12, 13),
+      Light_Lag0 = c("D", "D", "D", "B", "D", "B", "B", "B", "D", "B", "D", "D")
+    )
+  } else {
+    light_df <- tibble(
+      exp_session = seq_along(light_patterns_dpg[[.x]]),
+      Light_Lag0 = light_patterns_dpg[[.x]]
+    )
+  }
+  
+  df <- df %>% 
+    left_join(light_df, by = "exp_session")
+  
+  return(df)
+})
+
+# Build lagged light variables and filter valid triplets
+ibuttons_lmm <- ibuttons_lmm %>%
+  group_by(participant_id) %>%
+  arrange(exp_session) %>%
+  mutate(
+    Light_Lag1 = lag(Light_Lag0, 1),
+    Light_Lag2 = lag(Light_Lag0, 2)
+  ) %>%
+  ungroup() %>%
+  filter(!is.na(Light_Lag0) & !is.na(Light_Lag1) & !is.na(Light_Lag2)) %>%
+  filter(!(participant_id == "P10" & exp_session %in% c(6, 7))) %>%
+  mutate(
+    Light_Lag0_num = ifelse(Light_Lag0 == "D", 0, 1),
+    Light_Lag1_num = ifelse(Light_Lag1 == "D", 0, 1),
+    Light_Lag2_num = ifelse(Light_Lag2 == "D", 0, 1)
+  )
+
+# Add participant demographics
+participant_demographics_dpg <- tibble(
+  participant_id = c("P01", "P02", "P03", "P04", "P05", "P06", "P07", "P09", "P10"),
+  sex = c("female", "male", "female", "female", "male", "female", "female", "female", "male"),
+  age = c(24, 21, 24, 23, 31, 23, 24, 28, 32),
+  bmi = c(25.82645, 18.83239, 28.01022, 24.67550, 20.28651, 22.23099, 23.23346, 24.50895, 27.14304)
+)
+
+ibuttons_lmm <- ibuttons_lmm %>%
+  left_join(participant_demographics_dpg, by = "participant_id")
+
+# Apply exclusion criteria
+ibuttons_lmm <- ibuttons_lmm %>%
+  filter(participant_id != "P07")  # Exclude P07
+
+# Keep only necessary variables
+ibuttons_lmm <- ibuttons_lmm %>%
+  dplyr::select(
+    participant_id, exp_session, DPG_intervention,
+    Light_Lag0, Light_Lag1, Light_Lag2,
+    Light_Lag0_num, Light_Lag1_num, Light_Lag2_num,
+    sex, age, bmi
+  )
+```
+
+## Dataset Overview
+
+```{r dpg-lmm-structure}
+# Display structure
+str(ibuttons_lmm)
+```
+
+```{r dpg-lmm-head}
+# Display first rows
+head(ibuttons_lmm, 10)
+```
+
+```{r dpg-lmm-summary}
+# Summary
+cat("Total observations:", nrow(ibuttons_lmm), "\n")
+cat("Participants:", length(unique(ibuttons_lmm$participant_id)), "\n")
+cat("Sessions range:", min(ibuttons_lmm$exp_session), "-", max(ibuttons_lmm$exp_session), "\n")
+```
+
+## Dataset ibuttons_lmm
+
+```{r dpg-lmm-datatable}
+DT::datatable(
+  ibuttons_lmm,
+  options = list(
+    pageLength = 10,
+    scrollX = TRUE,
+    order = list(list(0, 'asc'), list(1, 'asc'))
+  ),
+  caption = "Complete DPG dataset for statistical analysis (P07 excluded)",
+  rownames = FALSE
+) %>%
+  DT::formatRound(columns = 'DPG_intervention', digits = 3) %>%
+  DT::formatRound(columns = 'bmi', digits = 2) %>%
+  DT::formatStyle(
+    'Light_Lag0',
+    backgroundColor = DT::styleEqual(c('D', 'B'), c('#e3f2fd', '#fff3e0'))
+  )
+```
+
+# Descriptive Statistics for DPG
+
+## Summary Statistics
+
+```{r dpg-lmm-summary-stats}
+summary(ibuttons_lmm$DPG_intervention)
+```
+
+```{r dpg-lmm-summary-table}
+data.frame(
+  N = nrow(ibuttons_lmm),
+  N_participants = length(unique(ibuttons_lmm$participant_id)),
+  Mean = round(mean(ibuttons_lmm$DPG_intervention), 2),
+  SD = round(sd(ibuttons_lmm$DPG_intervention), 2),
+  Min = round(min(ibuttons_lmm$DPG_intervention), 2),
+  Max = round(max(ibuttons_lmm$DPG_intervention), 2)
+)
+```
+
+## Distribution Visualization
+
+```{r dpg-lmm-distribution}
+ggplot(ibuttons_lmm, aes(x = DPG_intervention)) +
+  geom_histogram(aes(y = after_stat(density)), bins = 15, 
+                 fill = "#4A90E2", alpha = 0.7, color = "black") +
+  geom_density(color = "red", linewidth = 1) +
+  geom_vline(xintercept = mean(ibuttons_lmm$DPG_intervention), 
+             linetype = "dashed", color = "red") +
+  labs(title = "Distribution of Distal-Proximal Gradient during Intervention", 
+       x = "Distal-Proximal Gradient (°C)", 
+       y = "Density") +
+  theme_classic()
+```
+
+Interpretation: Despite the light left-skewness of the raw data, a LMM with Gaussian identity link function will be applied. However, within the diagnostics checks the normality assumption for residuals will be evaluated and different sensitivity analyses applied if necessary.
+
+## DPG Trajectories Across Experimental Sessions
+
+Individual participant trajectories with LOESS smooth (full dataset, n=67 observations)
+
+```{r dpg-lmm-trajectories}
+# Prepare data - count observations per session
+session_counts_dpg <- ibuttons_lmm %>%
+  group_by(exp_session) %>%
+  summarise(n = n(), .groups = "drop")
+
+# Create plot
+ggplot(ibuttons_lmm, 
+       aes(x = exp_session, y = DPG_intervention, 
+           color = participant_id, group = participant_id)) +
+  
+  # Individual trajectories
+  geom_line(alpha = 0.6, linewidth = 0.8) +
+  geom_point(size = 2.5, alpha = 0.7) +
+  
+  # LOESS smooth (overall trend)
+  geom_smooth(aes(group = 1), method = "loess", span = 0.75,
+              color = "black", linetype = "dashed", linewidth = 1.2,
+              se = TRUE, fill = "grey50", alpha = 0.3) +
+  
+  # Add sample size annotations for reduced sessions
+  geom_text(data = session_counts_dpg %>% filter(n < 8),
+            aes(x = exp_session, y = max(ibuttons_lmm$DPG_intervention) * 0.998, 
+                label = paste0("n=", n)),
+            color = "black", size = 3, inherit.aes = FALSE) +
+  
+  # Vertical line for data cutoff (session 10)
+  geom_vline(xintercept = 10.5, linetype = "dotted", color = "grey50", linewidth = 0.8) +
+  
+  # Scales
+  scale_x_continuous(
+    breaks = 3:13,
+    limits = c(2.5, 13.5),
+    expand = c(0.01, 0)
+  ) +
+  scale_y_continuous(
+    expand = expansion(mult = c(0.05, 0.05))
+  ) +
+  
+  # Colors
+  scale_color_manual(
+    values = c("P01" = "#E41A1C", "P02" = "#377EB8", "P03" = "#4DAF4A",
+               "P04" = "#984EA3", "P05" = "#FF7F00", "P06" = "#FFFF33",
+               "P09" = "#A65628", "P10" = "#F781BF"),
+    name = "Participant"
+  ) +
+  
+  # Labels
+  labs(
+    title = "Distal-proximal gradient across experimental sessions",
+    subtitle = "Individual participant trajectories with LOESS smooth (full dataset, n=67, P07 excluded)",
+    x = "Experimental Session",
+    y = "Distal-Proximal Gradient (°C)"
+  ) +
+  
+  # Theme
+  theme_classic(base_size = 14) +
+  theme(
+    plot.title = element_text(size = 16, face = "plain"),
+    plot.subtitle = element_text(size = 12, margin = margin(b = 10)),
+    axis.text = element_text(color = "black", size = 12),
+    axis.title = element_text(size = 13),
+    legend.position = "right",
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 11),
+    panel.grid.major.y = element_line(color = "grey90", linewidth = 0.3),
+    plot.margin = margin(15, 15, 10, 10)
+  )
+```
+
+## Light Condition Balance
+
+```{r dpg-lmm-light-balance}
+ibuttons_lmm %>%
+  summarise(
+    Lag0_Dim = sum(Light_Lag0_num == 0),
+    Lag0_Bright = sum(Light_Lag0_num == 1),
+    Lag1_Dim = sum(Light_Lag1_num == 0),
+    Lag1_Bright = sum(Light_Lag1_num == 1),
+    Lag2_Dim = sum(Light_Lag2_num == 0),
+    Lag2_Bright = sum(Light_Lag2_num == 1)
+  )
+```
+
+## Observations per Session
+
+```{r dpg-lmm-sessions}
+table(ibuttons_lmm$exp_session)
+```
+
+## Observations per Participant
+
+```{r dpg-lmm-participants}
+table(ibuttons_lmm$participant_id)
+```
+
+# Statistical Analysis for Distal-Proximal Gradient
+
+## Hierarchical Model Building Strategy
+
+### Model m0: Baseline (Random Intercept Only)
+
+This baseline model quantifies between-participant variability without any predictors.
+
+```{r dpg-m0}
+m0_dpg <- lmer(
+  DPG_intervention ~ 1 + (1 | participant_id),
+  data = ibuttons_lmm,
+  REML = FALSE
+)
+
+summary(m0_dpg)
+
+# Wald Confidence Intervals
+ci_m0 <- confint(m0_dpg, method = "Wald")
+print(ci_m0)
+```
+
+### Model m1a: Add Light Lag 0 (Current Day)
+
+This model adds the current day light exposure variable as a fixed effect with Light_Lag0_num.
+
+```{r dpg-m1a}
+m1a_dpg <- lmer(
+  DPG_intervention ~ 
+    Light_Lag0_num +
+    (1 | participant_id),
+  data = ibuttons_lmm,
+  REML = FALSE
+)
+
+summary(m1a_dpg)
+
+# Wald Confidence Intervals
+ci_m1a <- confint(m1a_dpg, method = "Wald")
+print(ci_m1a)
+```
+
+### Model m1b: Add Light Lag 1 Additionally (One Day Before)
+
+This model adds the light exposure one day before as a fixed effect using Light_Lag1_num.
+
+```{r dpg-m1b}
+m1b_dpg <- lmer(
+  DPG_intervention ~ 
+    Light_Lag0_num + Light_Lag1_num +
+    (1 | participant_id),
+  data = ibuttons_lmm,
+  REML = FALSE
+)
+
+summary(m1b_dpg)
+
+# Wald Confidence Intervals
+ci_m1b <- confint(m1b_dpg, method = "Wald")
+print(ci_m1b)
+```
+
+### Model m1c: Add Light Lag 2 Additionally (Two Days Before)
+
+This model adds the light exposure two days before as a fixed effect with Light_Lag2_num.
+
+```{r dpg-m1c}
+m1c_dpg <- lmer(
+  DPG_intervention ~ 
+    Light_Lag0_num + Light_Lag1_num + Light_Lag2_num +
+    (1 | participant_id),
+  data = ibuttons_lmm,
+  REML = FALSE
+)
+
+summary(m1c_dpg)
+
+# Wald Confidence Intervals
+ci_m1c <- confint(m1c_dpg, method = "Wald")
+print(ci_m1c)
+```
+
+### Likelihood Ratio Tests: Lag Effects
+
+```{r likelihood-ratio-tests-lag-effects}
+# LRT 1: Does adding Lag 0 improve fit over baseline?
+lrt_m0_vs_m1a_dpg <- anova(m0_dpg, m1a_dpg)
+
+# LRT 2: Does adding Lag 1 improve fit over Lag 0 only?
+lrt_m1a_vs_m1b_dpg <- anova(m1a_dpg, m1b_dpg)
+
+# LRT 3: Does adding Lag 2 improve fit over Lag 0 + Lag 1?
+lrt_m1b_vs_m1c_dpg <- anova(m1b_dpg, m1c_dpg)
+
+# Display results
+lrt_m0_vs_m1a_dpg
+lrt_m1a_vs_m1b_dpg
+lrt_m1b_vs_m1c_dpg
+```
+
+Interpretation Likelihood Ratio Tests Lag Effects:
+
+-   LRT 1: Adding Lag 0 did not improve fit over the baseline model only (m0 vs. m1a: χ²=1.0387, p=0.3081)
+
+-   LRT 2: Adding Lag 1 did not significantly improve fit over model m1a_dpg (m1a vs. m1b: χ²=0.2919, p=0.589)
+
+-   LRT 3: Adding Lag 2 did not significantly improve fit over model m1b_dpg (m1b vs. m1c: χ²=0.0754, p=0.7836)
+
+### Model m2: Add Linear Session Effect
+
+This model adds a linear session term to account for potential temporal trends across the study.
+
+```{r model-m2}
+m2_dpg <- lmer(
+  DPG_intervention ~ 
+    exp_session +
+    (1 | participant_id),
+  data = ibuttons_lmm,
+  REML = FALSE
+)
+
+summary(m2_dpg)
+
+# Wald Confidence Intervals
+ci_m2 <- confint(m2_dpg, method = "Wald")
+print(ci_m2)
+```
+
+### Model m3: Add Quadratic Session Effekct
+
+This model tests for non-linear temporal trends (e.g., U-shaped patterns) across sessions.
+
+```{r model-m3}
+m3_dpg <- lmer(
+  DPG_intervention ~ 
+    exp_session + I(exp_session^2) +
+    (1 | participant_id),
+  data = ibuttons_lmm,
+  REML = FALSE
+)
+
+summary(m3_dpg)
+
+# Wald Confidence Intervals
+ci_m3 <- confint(m3_dpg, method = "Wald")
+print(ci_m3)
+```
+
+### Likelihood Ratio Tests: Session Effects
+
+```{r likelihood-ratio-tests-session-effects}
+# LRT 1: Does adding exp_session (linear) improve fit over baseline?
+lrt_m0_vs_m2_dpg <- anova(m0_dpg, m2_dpg)
+
+# LRT 2: Does adding quadratic term improve fit over linear only?
+lrt_m2_vs_m3_dpg <- anova(m2_dpg, m3_dpg)
+
+lrt_m0_vs_m2_dpg
+lrt_m2_vs_m3_dpg
+```
+
+Interpretation Likelihood Ratio Tests Session Effects: - Adding a linear session term did not improve model fit over the baseline only model (m0 vs. m2: χ²=2.3853, p=0.1225)
+
+-   Adding a quadratic session term did not improve model fit over model m2 (m2 vs. m3: χ²=0.8772, p=0.349)
+
+## Model Selection Summary
+
+Based on LRT test results, model m0_dpg with the random intercept only was chosen as the final model. All other models did not find significant light or session effects of DPG values in this group.
+
+-   Model m1a_dpg: Lag 0 (β=0.2325, SE=0.2271, p=0.31); AIC=199.0, BIC=207.7
+
+-   Model m1b_dpg: Lag 0 (β=0.2274, SE=0.2268, p=0.320); Lag 1 (β=-0.1222, SE=0.2260, p=0.591); AIC=200.7, BIC=211.6
+
+-   Model m1c_dpg: Lag 0 (β=0.22274, SE=0.22726, p=0.331); Lag 1 (β=-0.11959, SE=0.22602, p=0.599); Lag 2 (β=-0.06224, SE=0.22651, p=0.784); AIC=202.6, BIC=215.7
+
+-   Model m2_dpg: Linear Session Term (β=-0.06925, SE=0.04425, p=0.123); AIC=197.6, BIC=206.3
+
+-   Model m3_dpg: Quadratic Session Term (β=0.01634, SE=0.01739, p=0.351012); AIC=198.8, BIC=209.6
+
+## Diagnostics Summary
+
+### Check 1: Normality Assumption for Residuals
+
+```{r normality-residuals}
+# Q-Q Plot Residuals
+qqnorm(resid(m0_dpg), main = "Q-Q Plot: Residuals")
+qqline(resid(m0_dpg), col = "red")
+
+# Shapiro-Wilk Test 
+shapiro.test(resid(m0_dpg))
+```
+
+Interpretation Check 1 Normality Assumption for Residuals: Normality assumption for residuals seems to be adequately met. Both visual inspection of the QQ-plot shows good alignment with the theoretical normal distribution with minor deviations in the lower and upper tails, likely attributable to the relatively small sample size. Also the Shapiro-Wilk Test did not find evidence against the normality of residuals (W=0.98497, p=0.6175).
+
+### Check 2: Distribution of Residuals
+
+```{r distribution-residuals}
+# Histogram with Density Curve
+ggplot(data.frame(residuals = resid(m0_dpg)), aes(x = residuals)) +
+  geom_histogram(aes(y = after_stat(density)), bins = 20, 
+                 fill = "#4A90E2", alpha = 0.7, color = "black") +
+  geom_density(color = "red", linewidth = 1) +
+  labs(title = "Distribution of Residuals (m0_dpg)",
+       x = "Residuals", y = "Density") +
+  theme_classic()
+```
+
+Interpretation Check 2 Distribution of Residuals: Consistent with the Q-Q plot findings, the histogram shows approximately normally distributed residuals with no extreme outliers.
+
+### Check 3: Normality of Random Effects
+
+```{r normality-random-effects}
+# Q-Q Plot of Random Effects (Intercepts)
+qqnorm(ranef(m0_dpg)$participant_id[,1], 
+       main = "Q-Q Plot: Random Intercepts")
+qqline(ranef(m0_dpg)$participant_id[,1], col = "red")
+```
+
+Interpretation Check 3 Normality of Random Effects: Acknowledging the limited interpretability due to the small number of random intercepts (n = 8), the assumption of normally distributed random effects appears to be reasonably met.
+
+### Check 4: Variance Components and ICC
+
+```{r variance-compoenents-icc}
+# Intraclass Correlation Coefficient
+icc(m0_dpg)
+
+# Model Performance
+model_performance(m0_dpg)
+```
+
+Interpretation Check 4 ICC: Approximately 54% of the total variance in DPG values is attributeable to between-participant differences, while the remaining 46% reflect the within-participant differences.
+
+### Check 5: Heteroscedasticity
+
+```{r heteroscedasticity}
+# Check for heteroscedasticity across participants
+df_resid <- data.frame(
+  participant_id = ibuttons_lmm$participant_id,
+  residuals = resid(m0_dpg)
+)
+
+ggplot(df_resid, aes(x = participant_id, y = residuals)) +
+  geom_boxplot(fill = "#4A90E2", alpha = 0.7) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+  labs(title = "Residuals by Participant (m0_dpg)",
+       x = "Participant", y = "Residuals") +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+Interpretation Check 5 Heteroscedasticity: Residual variances appeared reasonably consistent across participants, supporting model assumptions.
+
+### Check 6: Temporal Patterns
+
+```{r temporal-patterns}
+# Check for temporal patterns
+df_resid_time <- data.frame(
+  exp_session = ibuttons_lmm$exp_session,
+  residuals = resid(m0_dpg)
+)
+
+ggplot(df_resid_time, aes(x = exp_session, y = residuals)) +
+  geom_point(alpha = 0.6, size = 2.5) +
+  geom_smooth(method = "loess", se = TRUE, color = "red") +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(title = "Residuals across Sessions (m0_dpg)",
+       x = "Experimental Session", y = "Residuals") +
+  theme_classic()
+```
+
+Interpretation Check 6 Temporal Patterns: From Session 3 to around Session 8 a systematic downward trend is visible with a plateau at the end. Whereas session 11-13 are not well suited for interpretation due to the sparse data (n=3 for session 11, 12 and n=1 for session 13). The LOESS smooth confirms this pattern, suggesting a potential session effect not captured by the baseline model. This temporal pattern indicates that DPG may systematically decrease across experimental sessions, which was not detected as statistically significant in likelihood ratio tests (m0 vs m2: p=0.12), possibly due to limited statistical power (n=8 participants).
+
+# Sensitivity Analysis
+
+## Sensitivity Analysis 1: Exclude P06 (Problematic Outliers)
+
+Rationale: P06 showed extensive outliers during data cleaning (30-50%), potentially biasing model estimates. This sensitivity analysis tests model robustness by excluding P06 (n=7 participants remaining).
+
+```{r sensitivity-exclude-p06-data}
+# Create subset without P06
+ibuttons_lmm_sens <- ibuttons_lmm %>%
+  filter(participant_id != "P06")
+
+# Summary
+cat("Original dataset: n =", nrow(ibuttons_lmm), "observations,", 
+    length(unique(ibuttons_lmm$participant_id)), "participants\n")
+cat("Sensitivity dataset: n =", nrow(ibuttons_lmm_sens), "observations,", 
+    length(unique(ibuttons_lmm_sens$participant_id)), "participants\n")
+```
+
+```{r sensitivity-exclude-p06-summary}
+# Descriptive statistics comparison
+data.frame(
+  Dataset = c("Original (n=8)", "Sensitivity (n=7, P06 excluded)"),
+  N_obs = c(nrow(ibuttons_lmm), nrow(ibuttons_lmm_sens)),
+  Mean = c(mean(ibuttons_lmm$DPG_intervention), 
+           mean(ibuttons_lmm_sens$DPG_intervention)),
+  SD = c(sd(ibuttons_lmm$DPG_intervention), 
+         sd(ibuttons_lmm_sens$DPG_intervention)),
+  Min = c(min(ibuttons_lmm$DPG_intervention), 
+          min(ibuttons_lmm_sens$DPG_intervention)),
+  Max = c(max(ibuttons_lmm$DPG_intervention), 
+          max(ibuttons_lmm_sens$DPG_intervention))
+) %>%
+  kable(digits = 2, 
+        caption = "Descriptive statistics: Original vs. Sensitivity Analysis (P06 excluded)")
+```
+
+```{r sensitivity-exclude-p06-model}
+# Fit baseline model without P06
+m0_dpg_sens <- lmer(
+  DPG_intervention ~ 1 + (1 | participant_id),
+  data = ibuttons_lmm_sens,
+  REML = FALSE
+)
+
+summary(m0_dpg_sens)
+
+# Wald Confidence Intervals
+ci_m0_sens <- confint(m0_dpg_sens, method = "Wald")
+print(ci_m0_sens)
+
+# Add Lag 0 (without P06)
+m1a_dpg_sens <- lmer(
+  DPG_intervention ~ 
+    Light_Lag0_num +
+    (1 | participant_id),
+  data = ibuttons_lmm_sens,
+  REML = FALSE
+)
+
+summary(m1a_dpg_sens)
+
+# Wald Confidence Intervals
+ci_m1a_sens <- confint(m1a_dpg_sens, method = "Wald")
+print(ci_m1a_sens)
+
+# Add Lag 1 (without P06)
+m1b_dpg_sens <- lmer(
+  DPG_intervention ~ 
+    Light_Lag0_num + Light_Lag1_num + 
+    (1 | participant_id),
+  data = ibuttons_lmm_sens,
+  REML = FALSE
+)
+
+summary(m1b_dpg_sens)
+
+# Wald Confidence Intervals
+ci_m1b_sens <- confint(m1b_dpg_sens, method = "Wald")
+print(ci_m1b_sens)
+
+# Add Lag 2 (without P06)
+m1c_dpg_sens <- lmer(
+  DPG_intervention ~ 
+    Light_Lag0_num + Light_Lag1_num + Light_Lag2_num +
+    (1 | participant_id),
+  data = ibuttons_lmm_sens,
+  REML = FALSE
+)
+
+summary(m1c_dpg_sens)
+
+# Wald Confidence Intervals
+ci_m1c_sens <- confint(m1c_dpg_sens, method = "Wald")
+print(ci_m1c_sens)
+
+# LRT 1: Does adding Lag 0 improve fit over baseline (without P06)?
+lrt_m0_vs_m1a_dpg_sens <- anova(m0_dpg_sens, m1a_dpg_sens)
+
+# LRT 2: Does adding Lag 1 improve fit over Lag 0 only (without P06)?
+lrt_m1a_vs_m1b_dpg_sens <- anova(m1a_dpg_sens, m1b_dpg_sens)
+
+# LRT 3: Does adding Lag 2 improve fit over Lag 0 + Lag 1 (without P06)?
+lrt_m1b_vs_m1c_dpg_sens <- anova(m1b_dpg_sens, m1c_dpg_sens)
+
+# Display results
+lrt_m0_vs_m1a_dpg_sens
+lrt_m1a_vs_m1b_dpg_sens
+lrt_m1b_vs_m1c_dpg_sens
+
+# Add Linear Session Term to Model m0_dpg_sens (without P06)
+m2_dpg_sens <- lmer(
+  DPG_intervention ~ 
+    exp_session +
+    (1 | participant_id),
+  data = ibuttons_lmm_sens,
+  REML = FALSE
+)
+
+summary(m2_dpg_sens)
+
+# Wald Confidence Intervals
+ci_m2_sens <- confint(m2_dpg_sens, method = "Wald")
+print(ci_m2_sens)
+
+# Add Quadratic Session Term to Model m0_dpg_sens (without P06)
+m3_dpg_sens <- lmer(
+  DPG_intervention ~ 
+    exp_session + I(exp_session^2) +
+    (1 | participant_id),
+  data = ibuttons_lmm_sens,
+  REML = FALSE
+)
+
+summary(m3_dpg_sens)
+
+# Wald Confidence Intervals
+ci_m3_sens <- confint(m3_dpg_sens, method = "Wald")
+print(ci_m3_sens)
+
+# LRT 1: Does adding exp_session (linear) improve fit over baseline (without P06)?
+lrt_m0_vs_m2_dpg_sens <- anova(m0_dpg_sens, m2_dpg_sens)
+
+# LRT 2: Does adding quadratic term improve fit over linear only (without P06)?
+lrt_m2_vs_m3_dpg_sens <- anova(m2_dpg_sens, m3_dpg_sens)
+
+lrt_m0_vs_m2_dpg_sens
+lrt_m2_vs_m3_dpg_sens
+```
+
+Interpretation Sensitivity 1 (Excluding P06 out of the analysis due to a lot of outliers identified): Conclusions drawn from the analysis and hierarchiechal model building using the entire dataset were not changed comapred to using the dataset, which excludes P06 from the analysis.
+
+# Exploratory Analyses
+
+## Exploratory Analysis 1: Random Slopes for Light_Lag0
+
+Rationale: The primary models (m1a-m1c) assumed that light effects are identical across all participants (fixed slopes). This exploratory analysis tests whether participants vary in their response to current-day light exposure by fitting random slopes for Light_Lag0.
+
+```{r dpg-random-slope-lag0}
+# Fit model with random slopes for Light_Lag0
+m1c_dpg_rs_lag0 <- lmer(
+  DPG_intervention ~ Light_Lag0_num + Light_Lag1_num + Light_Lag2_num +
+    (1 + Light_Lag0_num | participant_id),
+  data = ibuttons_lmm, 
+  REML = FALSE, 
+  control = lmerControl(optimizer = "bobyqa")
+)
+
+summary(m1c_dpg_rs_lag0)
+
+# Wald Confidence Intervals
+ci_m1c_dpg_rs_lag0 <- confint(m1c_dpg_rs_lag0, method = "Wald")
+print(ci_m1c_dpg_rs_lag0)
+```
+
+Interpretation Exploratory Analysis 1 Random Slopes for Light_Lag0: The model with random slopes for Light_Lag0 resulted in a singular fit (correlation between random intercept and slope = 1.00), indicating that the data do not support individual variation in current-day light exposure effects. The random slope variance was minimal (SD = 0.18) and fully confounded with the random intercept structure.
+
+## Exploratory Analysis 2: Age and Sex Moderation
+
+Rationale: To test whether the skin temperature gradient is influenced by biological sex or age.
+
+```{r age-sex-moderation}
+# Fit model with age and sex 
+# Center age
+ibuttons_lmm <- ibuttons_lmm %>%
+  mutate(age_c = age - mean(age, na.rm = TRUE))
+
+# Moderation model 
+dpg_moderation <- lmer(
+  DPG_intervention ~ 
+    sex + age_c +
+    (1 | participant_id),
+  data = ibuttons_lmm,
+  REML = FALSE
+)
+
+summary(dpg_moderation)
+
+# Wald Confidence Intervals
+ci_dpg_moderation <- confint(dpg_moderation, method = "Wald")
+print(ci_dpg_moderation)
+```
+
+Interpretation Exploratory Analysis 2 Age and Sex Moderation: No statistically significant main effect was found of biological sex (male with female as reference category: β=0.35296, SE=0.84021, p=0.686) or age (centered: β=-0.02889, SE=0.10711, p=0.794). As no statistically signficant effects of the different light exposure variables or the experimental session number were found, no interactions between demographic factors and such fixed effects could be investigated.
+
+## Exploratory Analysis 3: Light Lag Interactions
+
+Rationale: Despite finding no significant main effects of light exposure on the current day or one or two days prior, all two-way interactions between the different Light Lags will be tested.
+
+```{r lag-interactions}
+dpg_interactions <- lmer(
+  DPG_intervention ~ 
+    Light_Lag0_num * Light_Lag1_num + 
+    Light_Lag0_num * Light_Lag2_num +
+    Light_Lag1_num * Light_Lag2_num +
+    (1 | participant_id),
+  data = ibuttons_lmm,
+  REML = FALSE
+)
+
+summary(dpg_interactions)
+
+# Wald Confidence Intervals
+ci_dpg_interactions <- confint(dpg_interactions, method = "Wald")
+print(ci_dpg_interactions)
+```
+
+Interpretation Exploratory 3 Light Lag Interactions: When including the interaction terms between the different Light Lags, the following results emerged:
+
+-   Light Lag 2: significant effect of Lag 2 for the DPG with bright light two days prior suggesting, that bright light exposure two days prior is associated with a more negative DPG of around -0.8°C (β=-0.797319, SE=0.379887, p=0.0403) when controlling for interactions.
+
+-   Light Lag 0 x Light Lag 2 Interaction: A significant positive interaction term between Lag 0 and Lag 2 was found (β=1.118357, SE=0.429289, p=0.0117). This interaction indicates that the effect of Lag2 depends on current-day light exposure: when both Lag0 and Lag2 are bright, the combined effect is less negative than would be predicted by adding the individual effects (non-additive relationship).
+
+All other effects and interactions were not statistically significant (p\>0.3). Despite the exploratory nature of this Light Lag Interactions model, a rather synergistic effect of current evenings light exposure with the light exposure 2 days prior on current evenings DPG values can be found, whereby current bright light appears to attenuate the effect of bright light from two days ago.
+
+## Exploratory Analysis 4: Persistence Analysis
+
+Rationale: The persistence analysis for DPG addresses the question: Does the number of consecutive days of the same light condition (run length) modulate DPG responses? This tests whether:
+
+-   Dim nights: Multiple consecutive dim evenings produce cumulative effects on DPG
+-   Bright nights: Multiple consecutive bright evenings produce cumulative effects on DPG
+
+Key distinction from lag analysis: - Lag analysis: Tests whether Day\[t-1\], Day\[t-2\] each add independent effects - Persistence analysis: Tests whether being on the 1st vs. 2nd vs. 3rd+ consecutive day of the same condition matters
+
+## Dataset Preparation
+
+```{r dpg-persistence-prep}
+participant_list_dpg <- c("P01", "P02", "P03", "P04", "P05", "P06", "P09", "P10")
+
+# Light patterns for DPG 
+light_patterns_dpg <- list(
+  P01 = c("D", "D", "D", "B", "B", "B", "D", "D", "B", "D", "B"),
+  P02 = c("D", "D", "D", "B", "B", "B", "D", "D", "B", "D", "B"),
+  P03 = c("D", "D", "D", "B", "B", "B", "D", "D", "B", "D", "B"),
+  P04 = c("D", "B", "B", "B", "D", "D", "D", "B", "D", "B"),
+  P05 = c("D", "B", "B", "B", "D", "D", "D", "B", "D", "B"),
+  P06 = c("D", "B", "B", "B", "D", "D", "D", "B", "D", "B"),
+  P07 = c("D", "B", "B", "B", "D", "D", "D", "B", "D", "B"),
+  P09 = c("D", "B", "B", "B", "D", "D", "D", "B", "D", "B"),
+  P10 = c("D", "D", "D", "B", "D", "B", "B", "B", "D", "B", "D", "D")
+)
+
+dpg_persistence <- map_dfr(participant_list_dpg, ~{
+  df <- ibuttons %>% 
+    filter(id == .x) %>%
+    # Extract session number from session variable (e.g., "C01_01" -> 1)
+    mutate(exp_session = as.integer(gsub("C0[1-4]_", "", session))) %>%
+    filter(!is.na(DPG_intervention)) %>%
+    # Aggregate by session: take mean DPG_intervention per session
+    group_by(id, exp_session) %>%
+    summarise(DPG_intervention = mean(DPG_intervention, na.rm = TRUE), .groups = "drop") %>%
+    rename(participant_id = id)
+  
+  # Get light pattern
+  pattern_vec <- light_patterns_dpg[[.x]]
+  
+  if (.x == "P10") {
+    # For P10: create indices for sessions excluding position 5
+    # P10 has 13 positions in total, but position 5 is excluded
+    # Sessions are: 1,2,3,4,6,7,8,9,10,11,12,13
+    valid_sessions <- c(1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 12, 13)
+    light_df <- tibble(
+      exp_session = valid_sessions, 
+      Light_Lag0 = pattern_vec
+    )
+  } else {
+    light_df <- tibble(
+      exp_session = seq_along(pattern_vec), 
+      Light_Lag0 = pattern_vec
+    )
+  }
+  
+  df %>% left_join(light_df, by = "exp_session")
+})
+
+# Add demographics 
+dpg_persistence <- dpg_persistence %>%
+  left_join(participant_demographics_dpg, by = "participant_id") %>%
+  filter(!is.na(Light_Lag0)) %>%
+  filter(!(participant_id == "P10" & exp_session == 5)) %>%
+  filter(participant_id != "P07") %>%  # Exclude P07
+  arrange(participant_id, exp_session) %>%
+  group_by(participant_id) %>%
+  mutate(
+    condition_change = Light_Lag0 != lag(Light_Lag0, default = first(Light_Lag0)),
+    run_id = cumsum(condition_change),
+    run_length = ave(run_id, run_id, FUN = seq_along),
+    run_length_dim = ifelse(Light_Lag0 == "D", run_length, NA),
+    run_length_bright = ifelse(Light_Lag0 == "B", run_length, NA),
+    Light_Lag0_num = ifelse(Light_Lag0 == "D", 0, 1)
+  ) %>%
+  ungroup() %>%
+  mutate(
+    run_category_dim = factor(case_when(
+      run_length_dim == 1 ~ "First",
+      run_length_dim == 2 ~ "Second",
+      run_length_dim >= 3 ~ "Third"
+    ), levels = c("First", "Second", "Third")),
+    run_category_bright = factor(case_when(
+      run_length_bright == 1 ~ "First",
+      run_length_bright == 2 ~ "Second",
+      run_length_bright >= 3 ~ "Third"
+    ), levels = c("First", "Second", "Third"))
+  ) %>%
+  select(participant_id, exp_session, DPG_intervention, Light_Lag0, Light_Lag0_num,
+         run_length, run_length_dim, run_length_bright, 
+         run_category_dim, run_category_bright, sex, age, bmi)
+
+# Verify dataset
+cat("Total observations:", nrow(dpg_persistence), "\n")
+cat("Participants:", paste(unique(dpg_persistence$participant_id), collapse = ", "), "\n")
+cat("P10 sessions:", paste(sort(dpg_persistence$exp_session[dpg_persistence$participant_id == "P10"]), collapse = ", "), "\n")
+```
+
+## Persistence Dataset
+
+```{r dpg-persistence-table}
+DT::datatable(
+  dpg_persistence,
+  options = list(
+    pageLength = 20, 
+    scrollX = TRUE, 
+    order = list(list(0, 'asc'), list(1, 'asc'))
+  ),
+  caption = "DPG Persistence dataset with run-length encoding (P07 excluded, all sessions)",
+  rownames = FALSE
+) %>%
+  DT::formatRound(columns = 'DPG_intervention', digits = 3) %>%
+  DT::formatRound(columns = 'bmi', digits = 2) %>%
+  DT::formatStyle(
+    'Light_Lag0', 
+    backgroundColor = DT::styleEqual(c('D', 'B'), c('#e3f2fd', '#fff3e0'))
+  )
+```
+
+## Descriptive Visualizations
+
+```{r dpg-persistence-plots, fig.width=12, fig.height=10}
+color_dim <- "#4A90E2"
+color_bright <- "#F5A623"
+
+# Prepare plotting datasets
+plot_data_dim_s1 <- dpg_persistence %>% 
+  filter(!is.na(run_length_dim)) %>% 
+  mutate(run_length_dim = factor(run_length_dim))
+
+plot_data_bright_s1 <- dpg_persistence %>% 
+  filter(!is.na(run_length_bright)) %>% 
+  mutate(run_length_bright = factor(run_length_bright))
+
+plot_data_dim_no_s1 <- dpg_persistence %>% 
+  filter(!is.na(run_length_dim), exp_session > 1) %>% 
+  mutate(run_length_dim = factor(run_length_dim))
+
+plot_data_bright_no_s1 <- dpg_persistence %>% 
+  filter(!is.na(run_length_bright), exp_session > 1) %>% 
+  mutate(run_length_bright = factor(run_length_bright))
+
+# Create plots
+p_dim_s1 <- ggplot(plot_data_dim_s1, aes(x = run_length_dim, y = DPG_intervention)) +
+  geom_boxplot(fill = color_dim, outlier.shape = NA, width = 0.6, linewidth = 0.5) +
+  geom_point(position = position_jitter(width = 0.15), size = 2.5, alpha = 0.7, shape = 16) +
+  labs(
+    title = "Dim Nights (with Session 1)", 
+    subtitle = paste0("n = ", nrow(plot_data_dim_s1)),
+    x = "Consecutive Nights", 
+    y = "DPG Intervention (°C)"
+  ) +
+  theme_classic(base_size = 14) +
+  theme(
+    plot.title = element_text(size = 16, hjust = 0),
+    plot.subtitle = element_text(size = 13, hjust = 0, margin = margin(b = 10)),
+    axis.text = element_text(color = "black", size = 13), 
+    axis.title = element_text(size = 14),
+    panel.grid.major.y = element_line(color = "grey90", linewidth = 0.3)
+  )
+
+p_bright_s1 <- ggplot(plot_data_bright_s1, aes(x = run_length_bright, y = DPG_intervention)) +
+  geom_boxplot(fill = color_bright, outlier.shape = NA, width = 0.6, linewidth = 0.5) +
+  geom_point(position = position_jitter(width = 0.15), size = 2.5, alpha = 0.7, shape = 16) +
+  labs(
+    title = "Bright Nights (with Session 1)", 
+    subtitle = paste0("n = ", nrow(plot_data_bright_s1)),
+    x = "Consecutive Nights", 
+    y = "DPG Intervention (°C)"
+  ) +
+  theme_classic(base_size = 14) +
+  theme(
+    plot.title = element_text(size = 16, hjust = 0),
+    plot.subtitle = element_text(size = 13, hjust = 0, margin = margin(b = 10)),
+    axis.text = element_text(color = "black", size = 13), 
+    axis.title = element_text(size = 14),
+    panel.grid.major.y = element_line(color = "grey90", linewidth = 0.3)
+  )
+
+p_dim_no_s1 <- ggplot(plot_data_dim_no_s1, aes(x = run_length_dim, y = DPG_intervention)) +
+  geom_boxplot(fill = color_dim, outlier.shape = NA, width = 0.6, linewidth = 0.5) +
+  geom_point(position = position_jitter(width = 0.15), size = 2.5, alpha = 0.7, shape = 16) +
+  labs(
+    title = "Dim Nights (without Session 1)", 
+    subtitle = paste0("n = ", nrow(plot_data_dim_no_s1)),
+    x = "Consecutive Nights", 
+    y = "DPG Intervention (°C)"
+  ) +
+  theme_classic(base_size = 14) +
+  theme(
+    plot.title = element_text(size = 16, hjust = 0),
+    plot.subtitle = element_text(size = 13, hjust = 0, margin = margin(b = 10)),
+    axis.text = element_text(color = "black", size = 13), 
+    axis.title = element_text(size = 14),
+    panel.grid.major.y = element_line(color = "grey90", linewidth = 0.3)
+  )
+
+p_bright_no_s1 <- ggplot(plot_data_bright_no_s1, aes(x = run_length_bright, y = DPG_intervention)) +
+  geom_boxplot(fill = color_bright, outlier.shape = NA, width = 0.6, linewidth = 0.5) +
+  geom_point(position = position_jitter(width = 0.15), size = 2.5, alpha = 0.7, shape = 16) +
+  labs(
+    title = "Bright Nights (without Session 1)", 
+    subtitle = paste0("n = ", nrow(plot_data_bright_no_s1)),
+    x = "Consecutive Nights", 
+    y = "DPG Intervention (°C)"
+  ) +
+  theme_classic(base_size = 14) +
+  theme(
+    plot.title = element_text(size = 16, hjust = 0),
+    plot.subtitle = element_text(size = 13, hjust = 0, margin = margin(b = 10)),
+    axis.text = element_text(color = "black", size = 13), 
+    axis.title = element_text(size = 14),
+    panel.grid.major.y = element_line(color = "grey90", linewidth = 0.3)
+  )
+
+# Combine plots
+(p_dim_s1 + p_bright_s1) / (p_dim_no_s1 + p_bright_no_s1) +
+  plot_layout(heights = c(1, 1))
+```
+
+## Model 1: Linear Persistence Models, Dim Evenings
+
+```{r dpg-persistence-dim-linear}
+# Dim Evenings (all sessions), linear
+dpg_persistence_dim <- dpg_persistence %>% filter(!is.na(run_length_dim))
+
+model_persistence_dim_numeric <- lmer(
+  DPG_intervention ~ run_length_dim + (1 | participant_id),
+  data = dpg_persistence_dim,
+  REML = FALSE
+)
+
+summary(model_persistence_dim_numeric)
+
+# Wald Confidence Intervals
+ci_model_persistence_dim_numeric <- confint(model_persistence_dim_numeric, method = "Wald")
+print(ci_model_persistence_dim_numeric)
+
+# Dim Evenings WITHOUT Session 1, linear
+dpg_persistence_dim_no_s1 <- dpg_persistence %>% filter(!is.na(run_length_dim), exp_session > 1)
+
+model_persistence_dim_no_s1 <- lmer(
+  DPG_intervention ~ run_length_dim + (1 | participant_id),
+  data = dpg_persistence_dim_no_s1,
+  REML = FALSE
+)
+
+summary(model_persistence_dim_no_s1)
+
+# Wald Confidence Intervals
+ci_model_persistence_dim_no_s1 <- confint(model_persistence_dim_no_s1, method = "Wald")
+print(ci_model_persistence_dim_no_s1)
+```
+
+Interpretation Exploratory 4 Persistence, Linear, Dim: To test whether consecutive dim light evenings produce cumulative effects on the distal-proximal skin temperature gradient during the light intervention window, the linear relationship between run length (number of consecutive dim evenings) and DPG was examined. Two models were fitted, whilst the first model includes all observations, the second model excludes Session 1, as there is no controlled light exposure on the previous day, which might influence results.
+
+Including Session 1 for dim evening analysis did not find a linear effect of consecutive dim evenings for average skin temperature gradient (β=0.1282, SE=0.1947, p=0.515).
+
+Excluding Session 1 for dim evening analysis did not find a linear effect of consecutive dim evenings for average skin temperature gradient (0.2968, SE=0.1985, p=0.146). Despite the visual impression that the DPG gradient is less negative, particularly on the third day of dim light, this visual trend could not be confirmed in the statistical analysis.
+
+The positive (non-significant) coefficients suggest that with increasing number of consecutive dim nights, the DPG graident becomes less negative. However, findings did not reach statistical significance.
+
+# Model 2: Linear Persistence Models, Bright Evenings
+
+```{r dpg-persistence-bright-linear}
+# Bright Evenings (all sessions), linear
+dpg_persistence_bright <- dpg_persistence %>% filter(!is.na(run_length_bright))
+
+model_persistence_bright_numeric <- lmer(
+  DPG_intervention ~ run_length_bright + (1 | participant_id),
+  data = dpg_persistence_bright,
+  REML = FALSE
+)
+
+summary(model_persistence_bright_numeric)
+
+# Wald Confidence Intervals
+ci_model_persistence_bright_numeric <- confint(model_persistence_bright_numeric, method = "Wald")
+print(ci_model_persistence_bright_numeric)
+
+# Bright Evenings WITHOUT Session 1, linear
+dpg_persistence_bright_no_s1 <- dpg_persistence %>% filter(!is.na(run_length_bright), exp_session > 1)
+
+model_persistence_bright_no_s1 <- lmer(
+  DPG_intervention ~ run_length_bright + (1 | participant_id),
+  data = dpg_persistence_bright_no_s1,
+  REML = FALSE
+)
+
+summary(model_persistence_bright_no_s1)
+
+# Wald Confidence Intervals
+ci_model_persistence_bright_no_s1 <- confint(model_persistence_bright_no_s1, method = "Wald")
+print(ci_model_persistence_bright_no_s1)
+```
+
+Interpretation Exploratory 4 Persistence, Linear, Bright: To test whether consecutive bright light evenings produce cumulative effects on average skin temperature gradient during the light intervention window, the linear relationship between run length (number of consecutive dim evenings) and DPG was examined. As the first evening light exposure was dim for all participants, the analysis including and excluding session 1 are the same.
+
+No statistically significant linear persistence effect was found for consecutive bright evenings (β=-0.0163, SE=0.1663, p=0.923).
+
+# Model 3: Categorical Persistence Models, Dim Evenings
+
+```{r dpg-persistence-dim-categorical}
+# Dim Evenings (all sessions), categorical
+dpg_persistence_dim <- dpg_persistence %>% filter(!is.na(run_category_dim))
+
+model_persistence_dim_categorical <- lmer(
+  DPG_intervention ~ run_category_dim + (1 | participant_id),
+  data = dpg_persistence_dim,
+  REML = FALSE
+)
+
+summary(model_persistence_dim_categorical)
+
+# Wald Confidence Intervals
+ci_model_persistence_dim_categorical <- confint(model_persistence_dim_categorical, method = "Wald")
+print(ci_model_persistence_dim_categorical)
+
+# Dim Evenings WITHOUT Session 1, categorical 
+dpg_persistence_dim_no_s1 <- dpg_persistence %>% filter(!is.na(run_category_dim), exp_session > 1)
+
+model_persistence_dim_categorical_no_s1 <- lmer(
+  DPG_intervention ~ run_category_dim + (1 | participant_id),
+  data = dpg_persistence_dim_no_s1,
+  REML = FALSE
+)
+
+summary(model_persistence_dim_categorical_no_s1)
+
+# Wald Confidence Intervals
+ci_model_persistence_dim_categorical_no_s1 <- confint(model_persistence_dim_categorical_no_s1, method = "Wald")
+print(ci_model_persistence_dim_categorical_no_s1)
+```
+
+Interpretation Exploratory 4 Persistence, Categorical, Dim: In order to examine potential non-linear patterns of cumulative dim light exposure on mean distal-proximal skin temperature gradient, a model was fitted using the categories second (2nd day cumulative dim light exposure) and third (3rd day cumulative dim light exposure) compared to the first dim night (reference category) to predict mean DPG values during the light intervention window. As in the linear persistence analysis, two models (first with, second without first experimental session) were fitted.
+
+Including Session 1 for dim evening analysis did not find non-linear effects of consecutive dim evenings for DPG values: Second (β=-0.3801, SE=0.3246, p=0.249), Third (β=0.5141, SE=0.3954, p=0.202).
+
+Excluding Session 1 for dim evening analysis did not find statistically significant non-linear effects of consecutive dim evenings for DPG values, however the effect of the third bright light evening almost reached statistical significance level: Second (β=-0.1461, SE=0.32, p=0.6587), Third (β=0.7745, SE=0.3948, p=0.0594).
+
+# Model 4: Categorical Persistence Models, Bright Evenings
+
+```{r dpg-persistence-bright-categorical}
+# Bright Evenings (all sessions), categorical
+dpg_persistence_bright <- dpg_persistence %>% filter(!is.na(run_category_bright))
+
+model_persistence_bright_categorical <- lmer(
+  DPG_intervention ~ run_category_bright + (1 | participant_id),
+  data = dpg_persistence_bright,
+  REML = FALSE
+)
+
+summary(model_persistence_bright_categorical)
+
+# Wald Confidence Intervals
+ci_model_persistence_bright_categorical <- confint(model_persistence_bright_categorical, method = "Wald")
+print(ci_model_persistence_bright_categorical)
+
+# Bright Evenings WITHOUT Session 1, categorical 
+pg_persistence_bright_no_s1 <- dpg_persistence %>% filter(!is.na(run_category_bright), exp_session > 1)
+
+model_persistence_bright_categorical_no_s1 <- lmer(
+  DPG_intervention ~ run_category_bright + (1 | participant_id),
+  data = dpg_persistence_bright_no_s1,
+  REML = FALSE
+)
+
+summary(model_persistence_bright_categorical_no_s1)
+
+# Wald Confidence Intervals
+ci_model_persistence_bright_categorical_no_s1 <- confint(model_persistence_bright_categorical_no_s1, method = "Wald")
+print(ci_model_persistence_bright_categorical_no_s1)
+```
+
+Interpretation: In order to examine potential non-linear patterns of cumulative bright light exposure on mean skin temperature gradient during light intervention period, a model was fitted using the categories second (2nd day cumulative bright light exposure) and third (3rd day cumulative bright light exposure) compared to the first bright night (reference category) to predict DPG values As the first evening light exposure was dim for all participants, the analysis including and excluding session 1 are the same.
+
+No statistically significant effects of the second consecutive bright evening was found for the second (β=-0.31031, SE=0.33753, p=0.365), and the third consecutive bright evening did not yield statistical significance (β=0.04873, SE=0.33753, p=0.886).
+
+# Exploratory Analysis: Climate Chamber Temperature
+
+An exploratory model including the temperature data from the climate chamber during the intervention window will be used to identify a potential impact of the climate temperature on distal-proximal gradient values. Despite efforts to keep the chamber at a constant temperature throughout and across sessions, some deviations happened, hence this analysis examines the robustness of findings to the inclusion of the climate chamber data.
+
+## Load Climate Data and Use UNIX Column (Correct Timestamps)
+
+```{r climate-load}
+# Load climate data
+climate_lab <- read_excel("C:/Users/anton/OneDrive/AfterGlow/data/raw/group/climate/01_climate_20250831T100000.xlsx")
+
+str(climate_lab)
+```
+
+```{r climate-convert-unix}
+# Convert UNIX timestamp to MESZ (UTC+2 for Munich summer time)
+climate_lab$unix_converted <- as_datetime(climate_lab$UNIX, tz = "Europe/Berlin")
+
+head(climate_lab)
+```
+
+## Group 1 Data Extraction & Processing
+
+```{r climate-group1}
+# Filter data
+group1_dates <- seq(as.Date("2025-06-16"), by = "day", length.out = 11)
+climate_group1_all <- climate_lab %>%
+  filter(
+    as.Date(unix_converted) %in% group1_dates,
+    hour(unix_converted) == 21 & minute(unix_converted) >= 30 |
+    hour(unix_converted) == 22 |
+    hour(unix_converted) == 23 & minute(unix_converted) == 0
+  ) %>%
+  mutate(
+    unix_converted = floor_date(unix_converted, unit = "minute"),
+    temp_felt = (tg + tdb) / 2
+  )
+
+# Check missing data
+gaps <- climate_group1_all %>%
+  arrange(unix_converted) %>%
+  group_by(as.Date(unix_converted)) %>%
+  mutate(time_diff = as.numeric(difftime(unix_converted, lag(unix_converted), units = "mins"))) %>%
+  filter(time_diff > 1) %>%
+  ungroup()
+
+cat("Total obs:", nrow(climate_group1_all), "| Gaps > 1 min:", nrow(gaps), "\n\n")
+table(as.Date(climate_group1_all$unix_converted))
+
+# Daily average
+temp_felt_daily <- climate_group1_all %>%
+  group_by(date_only = as.Date(unix_converted)) %>%
+  summarise(temp_felt_mean = mean(temp_felt, na.rm = TRUE), n_obs = n())
+print(temp_felt_daily)
+```
+
+## Group 2 Data Extraction & Processing
+
+```{r climate-group2}
+# Filter data
+group2_dates <- seq(as.Date("2025-06-30"), by = "day", length.out = 10)
+climate_group2_all <- climate_lab %>%
+  filter(
+    as.Date(unix_converted) %in% group2_dates,
+    hour(unix_converted) == 19 & minute(unix_converted) >= 30 |
+    hour(unix_converted) == 20 |
+    hour(unix_converted) == 21 & minute(unix_converted) == 0
+  ) %>%
+  mutate(
+    unix_converted = floor_date(unix_converted, unit = "minute"),
+    temp_felt = (tg + tdb) / 2
+  )
+
+# Check missing data
+gaps <- climate_group2_all %>%
+  arrange(unix_converted) %>%
+  group_by(as.Date(unix_converted)) %>%
+  mutate(time_diff = as.numeric(difftime(unix_converted, lag(unix_converted), units = "mins"))) %>%
+  filter(time_diff > 1) %>%
+  ungroup()
+
+cat("Total obs:", nrow(climate_group2_all), "| Gaps > 1 min:", nrow(gaps), "\n\n")
+table(as.Date(climate_group2_all$unix_converted))
+
+# Daily average
+temp_felt_daily_group2 <- climate_group2_all %>%
+  group_by(date_only = as.Date(unix_converted)) %>%
+  summarise(temp_felt_mean = mean(temp_felt, na.rm = TRUE), n_obs = n())
+print(temp_felt_daily_group2)
+```
+
+## Group 3 Data Extraction & Processing
+
+```{r climate-group3}
+# Filter data
+group3_dates <- seq(as.Date("2025-07-28"), by = "day", length.out = 10)
+climate_group3_all <- climate_lab %>%
+  filter(
+    as.Date(unix_converted) %in% group3_dates,
+    hour(unix_converted) == 21 |
+    hour(unix_converted) == 22 & minute(unix_converted) <= 30
+  ) %>%
+  mutate(
+    unix_converted = floor_date(unix_converted, unit = "minute"),
+    temp_felt = (tg + tdb) / 2
+  )
+
+# Check missing data
+gaps <- climate_group3_all %>%
+  arrange(unix_converted) %>%
+  group_by(as.Date(unix_converted)) %>%
+  mutate(time_diff = as.numeric(difftime(unix_converted, lag(unix_converted), units = "mins"))) %>%
+  filter(time_diff > 1) %>%
+  ungroup()
+
+cat("Total obs:", nrow(climate_group3_all), "| Gaps > 1 min:", nrow(gaps), "\n\n")
+table(as.Date(climate_group3_all$unix_converted))
+
+# Daily average
+temp_felt_daily_group3 <- climate_group3_all %>%
+  group_by(date_only = as.Date(unix_converted)) %>%
+  summarise(temp_felt_mean = mean(temp_felt, na.rm = TRUE), n_obs = n())
+print(temp_felt_daily_group3)
+```
+
+## Group 4 Data Extraction & Processing
+
+```{r climate-group4}
+# Filter data
+group4_dates <- seq(as.Date("2025-08-11"), by = "day", length.out = 13)
+climate_group4_all <- climate_lab %>%
+  filter(
+    as.Date(unix_converted) %in% group4_dates,
+    hour(unix_converted) == 20 & minute(unix_converted) >= 30 |
+    hour(unix_converted) == 21 |
+    hour(unix_converted) == 22 & minute(unix_converted) == 0
+  ) %>%
+  mutate(
+    unix_converted = floor_date(unix_converted, unit = "minute"),
+    temp_felt = (tg + tdb) / 2
+  )
+
+# Check missing data
+gaps <- climate_group4_all %>%
+  arrange(unix_converted) %>%
+  group_by(as.Date(unix_converted)) %>%
+  mutate(time_diff = as.numeric(difftime(unix_converted, lag(unix_converted), units = "mins"))) %>%
+  filter(time_diff > 1) %>%
+  ungroup()
+
+cat("Total obs:", nrow(climate_group4_all), "| Gaps > 1 min:", nrow(gaps), "\n\n")
+table(as.Date(climate_group4_all$unix_converted))
+
+# Daily average
+temp_felt_daily_group4 <- climate_group4_all %>%
+  group_by(date_only = as.Date(unix_converted)) %>%
+  summarise(temp_felt_mean = mean(temp_felt, na.rm = TRUE), n_obs = n())
+print(temp_felt_daily_group4)
+```
+
+## Add Climate Temperature to ibuttons_lmm Dataset
+
+```{r climate-join-ibuttons}
+# Remove temperature columns if they exist
+ibuttons_lmm <- ibuttons_lmm %>%
+  select(-contains("temp_felt_mean"), -contains("date_only"))
+
+# Create temperature lookup
+temp_lookup_dpg <- bind_rows(
+  temp_felt_daily %>% mutate(group = 1, participants = list(c("P01", "P02", "P03"))),
+  temp_felt_daily_group2 %>% mutate(group = 2, participants = list(c("P04", "P05"))),
+  temp_felt_daily_group3 %>% mutate(group = 3, participants = list(c("P06", "P07", "P09"))),
+  temp_felt_daily_group4 %>% mutate(group = 4, participants = list(c("P10")))
+) %>%
+  unnest(participants) %>%
+  group_by(participants, group) %>%
+  mutate(exp_session = row_number()) %>%
+  ungroup() %>%
+  select(participant_id = participants, exp_session, temp_felt_mean, date_only)
+
+# Join temperature data
+ibuttons_lmm <- ibuttons_lmm %>%
+  left_join(temp_lookup_dpg, by = c("participant_id", "exp_session"))
+
+# Check result
+ibuttons_lmm %>% 
+  filter(participant_id == "P02", exp_session == 3) %>%
+  select(participant_id, exp_session, DPG_intervention, temp_felt_mean, date_only)
+```
+
+```{r climate-datatable-ibuttons}
+DT::datatable(
+  ibuttons_lmm,
+  options = list(
+    pageLength = 10,
+    scrollX = TRUE,
+    order = list(list(0, 'asc'), list(1, 'asc'))
+  ),
+  caption = "Complete DPG dataset with temperature data",
+  rownames = FALSE
+) %>%
+  DT::formatRound(columns = 'DPG_intervention', digits = 3) %>%
+  DT::formatRound(columns = 'temp_felt_mean', digits = 2) %>%
+  DT::formatRound(columns = 'bmi', digits = 2) %>%
+  DT::formatStyle(
+    'Light_Lag0',
+    backgroundColor = DT::styleEqual(c('D', 'B'), c('#e3f2fd', '#fff3e0'))
+  )
+```
+
+## Fit LMM with Temperature as Fixed Effect
+
+```{r climate-models-dpg}
+# Model 1 m_temp: Temperature as predictor
+m_temp_dpg <- lmer(
+  DPG_intervention ~ temp_felt_mean + (1 | participant_id),
+  data = ibuttons_lmm,
+  REML = FALSE
+)
+
+summary(m_temp_dpg)
+
+# Wald Confidence Intervals
+ci_m_temp_dpg <- confint(m_temp_dpg, method = "Wald")
+print(ci_m_temp_dpg)
+
+# Model 2: Session + Temperature
+m_session_temp_dpg <- lmer(
+  DPG_intervention ~ exp_session + temp_felt_mean + (1 | participant_id),
+  data = ibuttons_lmm,
+  REML = FALSE
+)
+
+summary(m_session_temp_dpg)
+
+# Wald Confidence Intervals
+ci_m_session_temp_dpg <- confint(m_session_temp_dpg, method = "Wald")
+print(ci_m_session_temp_dpg)
+
+# Model 3: Lag 0 + Temperature 
+m_lag0_temp_dpg <- lmer(
+  DPG_intervention ~ Light_Lag0_num + temp_felt_mean + (1 | participant_id),
+  data = ibuttons_lmm,
+  REML = FALSE
+)
+
+summary(m_lag0_temp_dpg)
+
+# Wald Confidence Intervals
+ci_m_lag0_temp_dpg <- confint(m_lag0_temp_dpg, method = "Wald")
+print(ci_m_lag0_temp_dpg)
+
+# Model 4: Lag 1 + Temperature 
+m_lag1_temp_dpg <- lmer(
+  DPG_intervention ~ Light_Lag1_num + temp_felt_mean + (1 | participant_id),
+  data = ibuttons_lmm,
+  REML = FALSE
+)
+
+summary(m_lag1_temp_dpg)
+
+# Wald Confidence Intervals
+ci_m_lag1_temp_dpg <- confint(m_lag1_temp_dpg, method = "Wald")
+print(ci_m_lag1_temp_dpg)
+
+# Model 5: Lag 2 + Temperature 
+m_lag2_temp_dpg <- lmer(
+  DPG_intervention ~ Light_Lag2_num + temp_felt_mean + (1 | participant_id),
+  data = ibuttons_lmm,
+  REML = FALSE
+)
+
+summary(m_lag2_temp_dpg)
+
+# Wald Confidence Intervals
+ci_m_lag2_temp_dpg <- confint(m_lag2_temp_dpg, method = "Wald")
+print(ci_m_lag2_temp_dpg)
+```
+
+Interpretation Exploratory 5 Climate Data: To examine potential effects of laboratory sensed temperature on DPG values, sensitivity analyses including climate chamber temperature as a covariate were conducted:
+
+-   Model m_temp_dpg: A significant effect of the sensed temperature on DPG values was observed (β=0.6542, SE=0.2436, p=0.00933). Thereby an increase in sensed temperature by 1°C was associated with an increase in around 0.65°C in the distal-proximal skin temperature gradient (i.e., DPG became less negative, indicating greater distal vasodilation).
+
+-   Model m_session_temp_dpg: A significant effect for both sensed temperature (β=0.72502, SE=0.23627, p=0.00322) as well as experimental session number (β=-0.08596, SE=0.04093, p=0.04010). Thus an increase in 1°C of sensed temperature was associated with approximately an increase in 0.73°C of DPG, whereas an increase in experimental session number was associated with a decrease in DPG by around -0.086°C (more negative gradient).
+
+-   Model m_lag0_temp_dpg: When controlling for sensed temperature (β=0.70046, SE=0.28172, p=0.0156), no effect of current evening light exposure could be found on mean DPG values (β=-0.07833, SE=0.24723, p=0.7525).
+
+-   Model m_lag1_temp_dpg: Similarly when controlling for sensed temperature (β=0.64546, SE=0.24525, p=0.01075), no statistically significant effect of pior evenings light exposure could be found on DPG values (β=-0.06276, SE=0.21452, p=0.77093).
+
+-   Model m_lag2_temp_dpg: Similarly when controlling for sensed temperature (β=0.65086, SE=0.24471, p=0.00998), no statistically significant effect of the light exposure two days before could be found for mean DPG values (β=-0.03041, SE=0.21405, p=0.88755 ).
+
+In summary, despite consistent significant effects of an increase of sensed temperature being associated with an increase in DPG values, no significant effects of light exposure history (Lag 0, Lag 1, Lag 2) could be found wen controlling for ambient temperature.
+
+# Statistical Analysis Summary Table
+
+## Model Comparison: All Tested Models for DPG
+
+## Helper Functions
+
+```{r dpg-summary-helpers}
+# Helper functions to extract coefficients from LMM
+get_coef_lmm <- function(model, coef_name) {
+  coefs <- summary(model)$coefficients
+  if (coef_name %in% rownames(coefs)) {
+    return(coefs[coef_name, "Estimate"])
+  } else {
+    return(NA)
+  }
+}
+
+get_p_lmm <- function(model, coef_name) {
+  coefs <- summary(model)$coefficients
+  if (coef_name %in% rownames(coefs)) {
+    return(coefs[coef_name, "Pr(>|t|)"])
+  } else {
+    return(NA)
+  }
+}
+```
+
+## Model Comparison: All Tested Models for DPG
+
+```{r dpg-summary-table}
+# Create extended comparison table for DPG
+model_comparison_dpg <- data.frame(
+  Model = c(
+    "m0 (Baseline)",
+    "m1a (Lag 0)",
+    "m1b (Lag 0+1)",
+    "m1c (Lag 0+1+2)",
+    "m2 (+ Session)",
+    "m3 (+ Session²)",
+    "m0_sens (P06 excluded)",
+    "m1a_sens (P06 excluded)",
+    "m1b_sens (P06 excluded)",
+    "m1c_sens (P06 excluded)",
+    "m2_sens (P06 excluded)",
+    "m3_sens (P06 excluded)",
+    "Random Slopes Lag0",
+    "Light Interactions",
+    "Persistence Dim (linear)",
+    "Persistence Bright (linear)",
+    "Persistence Dim (categorical)",
+    "Persistence Bright (categorical)",
+    "Age/Sex Moderation Light",
+    "Temperature Only",
+    "Session + Temperature",
+    "Lag0 + Temperature",
+    "Lag1 + Temperature",
+    "Lag2 + Temperature"
+  ),
+  
+  Description = c(
+    "Intercept only",
+    "Light Lag 0 only",
+    "Lag 0 + Lag 1",
+    "Lag 0 + Lag 1 + Lag 2",
+    "Session (linear)",
+    "Session + Session²",
+    "Baseline (n=7, P06+P07 excluded)",
+    "Lag 0 only (n=7, P06+P07 excluded)",
+    "Lag 0 + Lag 1 (n=7, P06+P07 excluded)",
+    "Lag 0 + Lag 1 + Lag 2 (n=7, P06+P07 excluded)",
+    "Session (linear, n=7, P06+P07 excluded)",
+    "Session + Session² (n=7, P06+P07 excluded)",
+    "m1c + random slope Lag0",
+    "Lag 0 × Lag 1 × Lag 2 interactions",
+    "Run length dim (continuous)",
+    "Run length bright (continuous)",
+    "Run category dim (First/Second/Third)",
+    "Run category bright (First/Second/Third)",
+    "m1c + age + sex + light interactions",
+    "Temperature as predictor",
+    "Session + Temperature",
+    "Lag 0 + Temperature",
+    "Lag 1 + Temperature",
+    "Lag 2 + Temperature"
+  ),
+  
+  npar = c(
+    attr(logLik(m0_dpg), "df"),
+    attr(logLik(m1a_dpg), "df"),
+    attr(logLik(m1b_dpg), "df"),
+    attr(logLik(m1c_dpg), "df"),
+    attr(logLik(m2_dpg), "df"),
+    attr(logLik(m3_dpg), "df"),
+    attr(logLik(m0_dpg_sens), "df"),
+    attr(logLik(m1a_dpg_sens), "df"),
+    attr(logLik(m1b_dpg_sens), "df"),
+    attr(logLik(m1c_dpg_sens), "df"),
+    attr(logLik(m2_dpg_sens), "df"),
+    attr(logLik(m3_dpg_sens), "df"),
+    attr(logLik(m1c_dpg_rs_lag0), "df"),
+    attr(logLik(dpg_interactions), "df"),
+    attr(logLik(model_persistence_dim_numeric), "df"),
+    attr(logLik(model_persistence_bright_numeric), "df"),
+    attr(logLik(model_persistence_dim_categorical), "df"),
+    attr(logLik(model_persistence_bright_categorical), "df"),
+    NA,  # Age/Sex moderation if fitted
+    attr(logLik(m_temp_dpg), "df"),
+    attr(logLik(m_session_temp_dpg), "df"),
+    attr(logLik(m_lag0_temp_dpg), "df"),
+    attr(logLik(m_lag1_temp_dpg), "df"),
+    attr(logLik(m_lag2_temp_dpg), "df")
+  ),
+  
+  N_obs = c(
+    rep(nrow(ibuttons_lmm), 6),  # Primary models (n=65)
+    rep(nrow(ibuttons_lmm_sens), 6),  # Sensitivity models (n=57)
+    nrow(ibuttons_lmm),  # Random slopes
+    nrow(ibuttons_lmm),  # Interactions
+    nrow(dpg_persistence_dim),  # Persistence dim
+    nrow(dpg_persistence_bright),  # Persistence bright
+    nrow(dpg_persistence_dim),  # Persistence dim categorical
+    nrow(dpg_persistence_bright),  # Persistence bright categorical
+    nrow(ibuttons_lmm),  # Age/Sex moderation
+    rep(nrow(ibuttons_lmm), 5)  # Temperature models
+  ),
+  
+  AIC = c(
+    round(AIC(m0_dpg), 1),
+    round(AIC(m1a_dpg), 1),
+    round(AIC(m1b_dpg), 1),
+    round(AIC(m1c_dpg), 1),
+    round(AIC(m2_dpg), 1),
+    round(AIC(m3_dpg), 1),
+    round(AIC(m0_dpg_sens), 1),
+    round(AIC(m1a_dpg_sens), 1),
+    round(AIC(m1b_dpg_sens), 1),
+    round(AIC(m1c_dpg_sens), 1),
+    round(AIC(m2_dpg_sens), 1),
+    round(AIC(m3_dpg_sens), 1),
+    round(AIC(m1c_dpg_rs_lag0), 1),
+    round(AIC(dpg_interactions), 1),
+    round(AIC(model_persistence_dim_numeric), 1),
+    round(AIC(model_persistence_bright_numeric), 1),
+    round(AIC(model_persistence_dim_categorical), 1),
+    round(AIC(model_persistence_bright_categorical), 1),
+    NA,  # Age/Sex moderation
+    round(AIC(m_temp_dpg), 1),
+    round(AIC(m_session_temp_dpg), 1),
+    round(AIC(m_lag0_temp_dpg), 1),
+    round(AIC(m_lag1_temp_dpg), 1),
+    round(AIC(m_lag2_temp_dpg), 1)
+  ),
+  
+  BIC = c(
+    round(BIC(m0_dpg), 1),
+    round(BIC(m1a_dpg), 1),
+    round(BIC(m1b_dpg), 1),
+    round(BIC(m1c_dpg), 1),
+    round(BIC(m2_dpg), 1),
+    round(BIC(m3_dpg), 1),
+    round(BIC(m0_dpg_sens), 1),
+    round(BIC(m1a_dpg_sens), 1),
+    round(BIC(m1b_dpg_sens), 1),
+    round(BIC(m1c_dpg_sens), 1),
+    round(BIC(m2_dpg_sens), 1),
+    round(BIC(m3_dpg_sens), 1),
+    round(BIC(m1c_dpg_rs_lag0), 1),
+    round(BIC(dpg_interactions), 1),
+    round(BIC(model_persistence_dim_numeric), 1),
+    round(BIC(model_persistence_bright_numeric), 1),
+    round(BIC(model_persistence_dim_categorical), 1),
+    round(BIC(model_persistence_bright_categorical), 1),
+    NA,  # Age/Sex moderation
+    round(BIC(m_temp_dpg), 1),
+    round(BIC(m_session_temp_dpg), 1),
+    round(BIC(m_lag0_temp_dpg), 1),
+    round(BIC(m_lag1_temp_dpg), 1),
+    round(BIC(m_lag2_temp_dpg), 1)
+  ),
+  
+  Beta_Main = c(
+    NA,
+    round(get_coef_lmm(m1a_dpg, "Light_Lag0_num"), 3),
+    round(get_coef_lmm(m1b_dpg, "Light_Lag0_num"), 3),
+    round(get_coef_lmm(m1c_dpg, "Light_Lag0_num"), 3),
+    round(get_coef_lmm(m2_dpg, "exp_session"), 3),
+    round(get_coef_lmm(m3_dpg, "exp_session"), 3),
+    NA,
+    round(get_coef_lmm(m1a_dpg_sens, "Light_Lag0_num"), 3),
+    round(get_coef_lmm(m1b_dpg_sens, "Light_Lag0_num"), 3),
+    round(get_coef_lmm(m1c_dpg_sens, "Light_Lag0_num"), 3),
+    round(get_coef_lmm(m2_dpg_sens, "exp_session"), 3),
+    round(get_coef_lmm(m3_dpg_sens, "exp_session"), 3),
+    round(get_coef_lmm(m1c_dpg_rs_lag0, "Light_Lag0_num"), 3),
+    round(get_coef_lmm(dpg_interactions, "Light_Lag2_num"), 3),
+    round(get_coef_lmm(model_persistence_dim_numeric, "run_length_dim"), 3),
+    round(get_coef_lmm(model_persistence_bright_numeric, "run_length_bright"), 3),
+    round(get_coef_lmm(model_persistence_dim_categorical, "run_category_dimSecond"), 3),
+    round(get_coef_lmm(model_persistence_bright_categorical, "run_category_brightSecond"), 3),
+    NA,  # Age/Sex moderation
+    round(get_coef_lmm(m_temp_dpg, "temp_felt_mean"), 3),
+    round(get_coef_lmm(m_session_temp_dpg, "exp_session"), 3),
+    round(get_coef_lmm(m_lag0_temp_dpg, "Light_Lag0_num"), 3),
+    round(get_coef_lmm(m_lag1_temp_dpg, "Light_Lag1_num"), 3),
+    round(get_coef_lmm(m_lag2_temp_dpg, "Light_Lag2_num"), 3)
+  ),
+  
+  p_Main = c(
+    NA,
+    format.pval(get_p_lmm(m1a_dpg, "Light_Lag0_num"), digits = 3, eps = 0.001),
+    format.pval(get_p_lmm(m1b_dpg, "Light_Lag0_num"), digits = 3, eps = 0.001),
+    format.pval(get_p_lmm(m1c_dpg, "Light_Lag0_num"), digits = 3, eps = 0.001),
+    format.pval(get_p_lmm(m2_dpg, "exp_session"), digits = 3, eps = 0.001),
+    format.pval(get_p_lmm(m3_dpg, "exp_session"), digits = 3, eps = 0.001),
+    NA,
+    format.pval(get_p_lmm(m1a_dpg_sens, "Light_Lag0_num"), digits = 3, eps = 0.001),
+    format.pval(get_p_lmm(m1b_dpg_sens, "Light_Lag0_num"), digits = 3, eps = 0.001),
+    format.pval(get_p_lmm(m1c_dpg_sens, "Light_Lag0_num"), digits = 3, eps = 0.001),
+    format.pval(get_p_lmm(m2_dpg_sens, "exp_session"), digits = 3, eps = 0.001),
+    format.pval(get_p_lmm(m3_dpg_sens, "exp_session"), digits = 3, eps = 0.001),
+    format.pval(get_p_lmm(m1c_dpg_rs_lag0, "Light_Lag0_num"), digits = 3, eps = 0.001),
+    format.pval(get_p_lmm(dpg_interactions, "Light_Lag2_num"), digits = 3, eps = 0.001),
+    format.pval(get_p_lmm(model_persistence_dim_numeric, "run_length_dim"), digits = 3, eps = 0.001),
+    format.pval(get_p_lmm(model_persistence_bright_numeric, "run_length_bright"), digits = 3, eps = 0.001),
+    format.pval(get_p_lmm(model_persistence_dim_categorical, "run_category_dimSecond"), digits = 3, eps = 0.001),
+    format.pval(get_p_lmm(model_persistence_bright_categorical, "run_category_brightSecond"), digits = 3, eps = 0.001),
+    NA,  # Age/Sex moderation
+    format.pval(get_p_lmm(m_temp_dpg, "temp_felt_mean"), digits = 3, eps = 0.001),
+    format.pval(get_p_lmm(m_session_temp_dpg, "exp_session"), digits = 3, eps = 0.001),
+    format.pval(get_p_lmm(m_lag0_temp_dpg, "Light_Lag0_num"), digits = 3, eps = 0.001),
+    format.pval(get_p_lmm(m_lag1_temp_dpg, "Light_Lag1_num"), digits = 3, eps = 0.001),
+    format.pval(get_p_lmm(m_lag2_temp_dpg, "Light_Lag2_num"), digits = 3, eps = 0.001)
+  ),
+  
+  Status = c(
+    "FINAL MODEL",
+    "Step 1 (non-sig)",
+    "Step 2 (non-sig)",
+    "Step 3 (non-sig)",
+    "Not selected (trend p=0.12)",
+    "Not selected (non-sig)",
+    "Sensitivity (n=7)",
+    "Sensitivity (n=7, non-sig)",
+    "Sensitivity (n=7, non-sig)",
+    "Sensitivity (n=7, non-sig)",
+    "Sensitivity (n=7, non-sig)",
+    "Sensitivity (n=7, non-sig)",
+    "Exploratory (singular fit)",
+    "Exploratory (Lag2 sig, Lag0×Lag2 sig)",
+    "Exploratory (non-sig)",
+    "Exploratory (non-sig)",
+    "Exploratory (non-sig)",
+    "Exploratory (non-sig)",
+    "Exploratory (non-sig)",
+    "Exploratory (temp sig)",
+    "Exploratory (session sig, temp sig)",
+    "Exploratory (temp sig)",
+    "Exploratory (temp sig)",
+    "Exploratory (temp sig)"
+  )
+)
+
+kable(model_comparison_dpg, 
+      caption = "Model Comparison: All Tested Models for Distal-Proximal Gradient (DPG)",
+      align = c('l', 'l', 'c', 'c', 'c', 'c', 'c', 'c', 'l'),
+      col.names = c("Model", "Description", "npar", "N", "AIC", "BIC", 
+                    "β Main", "p Main", "Status")) %>%
+  kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover")) %>%
+  row_spec(1, bold = TRUE, background = "#D6EAF8") %>%
+  pack_rows("Primary Model Selection (n=65)", 1, 6) %>%
+  pack_rows("Sensitivity Analyses (P06 excluded, n=57)", 7, 12) %>%
+  pack_rows("Exploratory Analyses", 13, 24)
+```
+
+## Final Model Summary: m0_dpg
+
+```{r dpg-final-model-summary}
+# Extract components from m0_dpg
+m0_dpg_coef <- summary(m0_dpg)$coefficients
+
+# Variance components
+vc_final_dpg <- as.data.frame(VarCorr(m0_dpg))
+
+cat("**Final Model: m0_dpg (Baseline - Random Intercept Only)**\n\n")
+
+cat("**Fixed Effects:**\n")
+cat("Intercept:", round(m0_dpg_coef["(Intercept)", "Estimate"], 3), "°C\n")
+cat("  SE:", round(m0_dpg_coef["(Intercept)", "Std. Error"], 3), "\n")
+cat("  p:", format.pval(m0_dpg_coef["(Intercept)", "Pr(>|t|)"], digits = 3, eps = 0.001), "\n\n")
+
+cat("**Variance Components:**\n")
+cat("Between-participant (Random Intercept):", round(vc_final_dpg$vcov[1], 3), "\n")
+cat("Within-participant (Residual):", round(vc_final_dpg$vcov[2], 3), "\n\n")
+
+# Calculate ICC
+icc_final_dpg <- vc_final_dpg$vcov[1] / (vc_final_dpg$vcov[1] + vc_final_dpg$vcov[2])
+cat("ICC (Intraclass Correlation):", round(icc_final_dpg, 3), 
+    paste0("(", round(icc_final_dpg * 100, 1), "% of variance between participants)"), "\n\n")
+
+cat("**Model Fit:**\n")
+cat("AIC:", round(AIC(m0_dpg), 1), "| BIC:", round(BIC(m0_dpg), 1), "\n")
+cat("N obs:", nrow(ibuttons_lmm), "| N participants:", 
+    length(unique(ibuttons_lmm$participant_id)), "\n")
+cat("Family: Gaussian (identity link)\n\n")
+```
+
+# Combined figure of boxplots 
+```{r}
+#| label: fig-combined-dpg-boxplots
+#| fig-cap: "DPG under light exposure doublets and triplets (P07 excluded)"
+#| fig-width: 20
+#| fig-height: 16
+
+# Labels with bold second letter
+doublet_labels <- c(
+  "DD" = expression("D"*bold("D")),
+  "BD" = expression("B"*bold("D")),
+  "DB" = expression("D"*bold("B")),
+  "BB" = expression("B"*bold("B"))
+)
+
+# Colors based on second letter
+doublet_colors <- c(
+  "DD" = "#4A90E2", "BD" = "#4A90E2",
+  "DB" = "#F5A623", "BB" = "#F5A623"
+)
+
+# Labels with bold third letter
+triplet_labels <- c(
+  "DDD" = expression("DD"*bold("D")),
+  "BDD" = expression("BD"*bold("D")),
+  "DBD" = expression("DB"*bold("D")),
+  "BBD" = expression("BB"*bold("D")),
+  "DDB" = expression("DD"*bold("B")),
+  "BDB" = expression("BD"*bold("B")),
+  "DBB" = expression("DB"*bold("B")),
+  "BBB" = expression("BB"*bold("B"))
+)
+
+# Colors based on third letter
+triplet_colors <- c(
+  "DDD" = "#4A90E2", "BDD" = "#4A90E2", "DBD" = "#4A90E2", "BBD" = "#4A90E2",
+  "DDB" = "#F5A623", "BDB" = "#F5A623", "DBB" = "#F5A623", "BBB" = "#F5A623"
+)
+
+# Compute shared y-axis range across all four datasets
+all_values <- c(
+  df_plot_dpg_noP07$mean_dpg,
+  df_plot_dpg_int_noP07$mean_dpg_int,
+  df_plot_dpg_triplet_noP07$mean_dpg,
+  df_plot_dpg_triplet_int_noP07$mean_dpg_int
+)
+y_min <- floor(min(all_values, na.rm = TRUE))
+y_max <- ceiling(max(all_values, na.rm = TRUE))
+y_breaks <- pretty(c(y_min, y_max), n = 6)
+
+# --- Plot 1: Doublet 5h ---
+p1 <- ggplot(df_plot_dpg_noP07, aes(x = doublet, y = mean_dpg)) +
+  geom_boxplot(aes(fill = doublet), outlier.shape = NA, width = 0.6, linewidth = 0.5) +
+  geom_point(position = position_jitter(width = 0.15, seed = 42),
+             size = 2.5, alpha = 0.7, shape = 16) +
+  scale_fill_manual(values = doublet_colors) +
+  scale_x_discrete(labels = doublet_labels) +
+  scale_y_continuous(limits = c(y_min, y_max), breaks = y_breaks) +
+  labs(
+    title = "Doublets \u2013 5-h exposure",
+    x = "Doublet",
+    y = "Mean Distal-Proximal Gradient (\u00b0C)"
+  ) +
+  theme_classic(base_size = 14) +
+  theme(
+    aspect.ratio = 1,
+    plot.title = element_text(size = 16, hjust = 0),
+    axis.text = element_text(color = "black", size = 13),
+    axis.title = element_text(size = 14),
+    panel.grid.major.y = element_line(color = "grey90", linewidth = 0.3),
+    legend.position = "none"
+  )
+
+# --- Plot 2: Doublet 1.5h ---
+p2 <- ggplot(df_plot_dpg_int_noP07, aes(x = doublet, y = mean_dpg_int)) +
+  geom_boxplot(aes(fill = doublet), outlier.shape = NA, width = 0.6, linewidth = 0.5) +
+  geom_point(position = position_jitter(width = 0.15, seed = 42),
+             size = 2.5, alpha = 0.7, shape = 16) +
+  scale_fill_manual(values = doublet_colors) +
+  scale_x_discrete(labels = doublet_labels) +
+  scale_y_continuous(limits = c(y_min, y_max), breaks = y_breaks) +
+  labs(
+    title = "Doublets \u2013 1.5-h intervention",
+    x = "Doublet",
+    y = "Mean Distal-Proximal Gradient (\u00b0C)"
+  ) +
+  theme_classic(base_size = 14) +
+  theme(
+    aspect.ratio = 1,
+    plot.title = element_text(size = 16, hjust = 0),
+    axis.text = element_text(color = "black", size = 13),
+    axis.title = element_text(size = 14),
+    panel.grid.major.y = element_line(color = "grey90", linewidth = 0.3),
+    legend.position = "none"
+  )
+
+# --- Plot 3: Triplet 5h ---
+p3 <- ggplot(df_plot_dpg_triplet_noP07, aes(x = triplet, y = mean_dpg)) +
+  geom_boxplot(aes(fill = triplet), outlier.shape = NA, width = 0.6, linewidth = 0.5) +
+  geom_point(position = position_jitter(width = 0.15, seed = 42),
+             size = 2.5, alpha = 0.7, shape = 16) +
+  scale_fill_manual(values = triplet_colors) +
+  scale_x_discrete(labels = triplet_labels) +
+  scale_y_continuous(limits = c(y_min, y_max), breaks = y_breaks) +
+  labs(
+    title = "Triplets \u2013 5-h exposure",
+    x = "Triplet",
+    y = "Mean Distal-Proximal Gradient (\u00b0C)"
+  ) +
+  theme_classic(base_size = 14) +
+  theme(
+    aspect.ratio = 1,
+    plot.title = element_text(size = 16, hjust = 0),
+    axis.text = element_text(color = "black", size = 13),
+    axis.title = element_text(size = 14),
+    panel.grid.major.y = element_line(color = "grey90", linewidth = 0.3),
+    legend.position = "none"
+  )
+
+# --- Plot 4: Triplet 1.5h ---
+p4 <- ggplot(df_plot_dpg_triplet_int_noP07, aes(x = triplet, y = mean_dpg_int)) +
+  geom_boxplot(aes(fill = triplet), outlier.shape = NA, width = 0.6, linewidth = 0.5) +
+  geom_point(position = position_jitter(width = 0.15, seed = 42),
+             size = 2.5, alpha = 0.7, shape = 16) +
+  scale_fill_manual(values = triplet_colors) +
+  scale_x_discrete(labels = triplet_labels) +
+  scale_y_continuous(limits = c(y_min, y_max), breaks = y_breaks) +
+  labs(
+    title = "Triplets \u2013 1.5-h intervention",
+    x = "Triplet",
+    y = "Mean Distal-Proximal Gradient (\u00b0C)"
+  ) +
+  theme_classic(base_size = 14) +
+  theme(
+    aspect.ratio = 1,
+    plot.title = element_text(size = 16, hjust = 0),
+    axis.text = element_text(color = "black", size = 13),
+    axis.title = element_text(size = 14),
+    panel.grid.major.y = element_line(color = "grey90", linewidth = 0.3),
+    legend.position = "none"
+  )
+
+# --- Combine ---
+(p1 | p2) / (p3 | p4) +
+  plot_annotation(
+    title = "Distal-proximal skin temperature gradient under light exposure doublets and triplets",
+    subtitle = "Mean DPG of the second / third day per sequence type (5-h exposure & 1.5-h intervention; P07 excluded)",
+    theme = theme(
+      plot.title = element_text(size = 24, hjust = 0),
+      plot.subtitle = element_text(size = 18, hjust = 0, margin = margin(b = 10))
+    )
+  )
+```
